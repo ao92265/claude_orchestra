@@ -1,0 +1,45 @@
+{
+  "project": {
+    "name": "my-project",
+    "todo_file": "TODO.md",
+    "test_command": "npm test",
+    "lint_command": "npm run lint"
+  },
+  "agents": {
+    "implementer": {
+      "model": "sonnet",
+      "timeout": 900,
+      "retries": 2
+    },
+    "tester": {
+      "model": "sonnet",
+      "timeout": 600,
+      "retries": 1,
+      "use_mcp_playwright": true
+    },
+    "reviewer": {
+      "model": "opus",
+      "timeout": 300,
+      "retries": 0
+    },
+    "planner": {
+      "model": "sonnet",
+      "timeout": 300,
+      "retries": 0
+    }
+  },
+  "pipeline": {
+    "parallel_review_plan": true,
+    "auto_merge_on_approve": false,
+    "continuous": {
+      "enabled": false,
+      "max_cycles": 5,
+      "delay_seconds": 60
+    }
+  },
+  "notifications": {
+    "slack_webhook": "",
+    "on_success": true,
+    "on_failure": true
+  }
+}

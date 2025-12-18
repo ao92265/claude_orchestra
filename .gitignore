@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.log
+.claude_orchestra_state.json
+.claude_orchestra_summary.md
+.claude_orchestra_email.json
+.claude_orchestra_stop
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
