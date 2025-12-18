@@ -580,7 +580,7 @@ def handle_start(data):
         open(log_file, 'w').close()
 
         cmd = [
-            'python3',
+            'python3', '-u',  # Unbuffered output for real-time streaming
             os.path.join(script_dir, 'claude_orchestra.py'),
             '--project', project_path,
             '--continuous',

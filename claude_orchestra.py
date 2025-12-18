@@ -28,13 +28,18 @@ from enum import Enum
 from typing import Optional
 from datetime import datetime
 
-# Configure logging
+# Configure logging with immediate flush for real-time streaming
+class FlushingStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('claude_orchestra.log'),
-        logging.StreamHandler()
+        FlushingStreamHandler()  # Flushes after every log for real-time output
     ]
 )
 logger = logging.getLogger(__name__)
