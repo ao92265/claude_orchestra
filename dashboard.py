@@ -597,6 +597,6 @@ if __name__ == '__main__':
     print("Claude Orchestra Dashboard")
     print("=" * 50)
     print("")
-    print("Open http://localhost:5000 in your browser")
+    print("Open http://localhost:5050 in your browser")
     print("")
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    socketio.run(app, host='0.0.0.0', port=5050, debug=False)
