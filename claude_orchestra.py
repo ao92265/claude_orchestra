@@ -137,6 +137,24 @@ class ClaudeOrchestra:
         result_text = ""
         start_time = time.time()
 
+        def timestamp():
+            """Get current timestamp."""
+            return datetime.now().strftime("%H:%M:%S")
+
+        def log_print(msg, end="\n", flush=True):
+            """Print with timestamp and log to file."""
+            if end == "\n":
+                line = f"[{timestamp()}] {msg}"
+            else:
+                line = msg  # For streaming text, no timestamp
+            print(line, end=end, flush=flush)
+            # Also write to stream log file
+            try:
+                with open("claude_orchestra_stream.log", "a") as f:
+                    f.write(line + (end if end != "\n" else "\n"))
+            except:
+                pass
+
         def read_stream(stream, stream_type):
             """Read from stream and put lines into queue."""
             try:
@@ -160,7 +178,7 @@ class ClaudeOrchestra:
                     for block in msg.get("content", []):
                         if block.get("type") == "text":
                             text = block.get("text", "")
-                            print(f"  {text}", flush=True)
+                            log_print(f"  {text}")
                             result_text += text + "\n"
 
                 # Text being generated (streaming delta)
@@ -168,26 +186,26 @@ class ClaudeOrchestra:
                     delta = event.get("delta", {})
                     if delta.get("type") == "text_delta":
                         text = delta.get("text", "")
-                        print(text, end="", flush=True)
+                        log_print(text, end="")
                         result_text += text
 
                 # Tool use (shows what Claude is doing)
                 elif event_type == "tool_use":
                     tool_name = event.get("name", "unknown")
-                    print(f"\n  [TOOL] {tool_name}", flush=True)
+                    log_print(f"\n  [TOOL] {tool_name}")
 
                 # Content block start
                 elif event_type == "content_block_start":
                     block = event.get("content_block", {})
                     if block.get("type") == "tool_use":
                         tool_name = block.get("name", "")
-                        print(f"\n  [TOOL] Using: {tool_name}", flush=True)
+                        log_print(f"[TOOL] Using: {tool_name}")
                     elif block.get("type") == "text":
                         pass  # Text blocks handled by delta
 
                 # System messages
                 elif event_type == "system":
-                    print(f"  [SYSTEM] {event.get('message', '')}", flush=True)
+                    log_print(f"[SYSTEM] {event.get('message', '')}")
 
                 # Result/final message
                 elif event_type == "result":
@@ -196,7 +214,7 @@ class ClaudeOrchestra:
                 return True
             except json.JSONDecodeError:
                 # Not JSON, just print raw
-                print(f"  {line}", flush=True)
+                log_print(f"  {line}")
                 return True
             except Exception as e:
                 return True
@@ -211,9 +229,9 @@ class ClaudeOrchestra:
                 bufsize=1
             )
 
-            print("\n" + "=" * 60)
-            print("CLAUDE WORKING (live stream)")
-            print("=" * 60 + "\n")
+            log_print("=" * 60)
+            log_print("CLAUDE WORKING (live stream)")
+            log_print("=" * 60)
 
             # Start reader threads
             stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, 'stdout'))
@@ -240,7 +258,7 @@ class ClaudeOrchestra:
 
                 # Show heartbeat every 30s of no activity
                 if time.time() - last_activity > 30:
-                    print(f"\n  ... working ({int(elapsed)}s) ...", flush=True)
+                    log_print(f"... working ({int(elapsed)}s) ...")
                     last_activity = time.time()
 
                 try:
@@ -250,7 +268,7 @@ class ClaudeOrchestra:
                         full_output.append(line)
                         parse_and_display(line)
                     elif stream_type == 'stderr' and line:
-                        print(f"  [stderr] {line}", flush=True)
+                        log_print(f"[stderr] {line}")
                 except queue.Empty:
                     pass
 
@@ -266,10 +284,10 @@ class ClaudeOrchestra:
                             break
                     break
 
-            print("\n" + "=" * 60)
+            log_print("=" * 60)
             elapsed = time.time() - start_time
-            print(f"Completed in {elapsed:.1f}s")
-            print("=" * 60 + "\n")
+            log_print(f"Completed in {elapsed:.1f}s")
+            log_print("=" * 60)
 
             success = process.returncode == 0
             if success:
@@ -713,19 +731,34 @@ Focus on practical improvements that will genuinely help the project.
 
         return results
 
-    def run_continuous(self, max_cycles: int = 10, delay_between_cycles: int = 60):
+    def run_continuous(self, max_cycles: int = 10, delay_between_cycles: int = 60, max_hours: float = None):
         """
         Run continuous development cycles.
 
         Args:
             max_cycles: Maximum number of cycles to run (safety limit)
             delay_between_cycles: Seconds to wait between cycles
+            max_hours: Maximum hours to run (optional time limit)
         """
+        start_time = time.time()
+        max_seconds = max_hours * 3600 if max_hours else None
+
         logger.info(f"Starting continuous mode: max {max_cycles} cycles")
+        if max_hours:
+            logger.info(f"Time limit: {max_hours} hour(s)")
 
         for cycle in range(1, max_cycles + 1):
+            # Check time limit
+            if max_seconds and (time.time() - start_time) >= max_seconds:
+                elapsed_hours = (time.time() - start_time) / 3600
+                logger.info(f"Time limit reached ({elapsed_hours:.1f} hours). Stopping.")
+                break
+
             logger.info(f"\n{'#' * 60}")
             logger.info(f"CYCLE {cycle}/{max_cycles}")
+            if max_hours:
+                remaining = max_seconds - (time.time() - start_time)
+                logger.info(f"Time remaining: {remaining/60:.0f} minutes")
             logger.info(f"{'#' * 60}")
 
             try:
@@ -887,6 +920,11 @@ Examples:
         action="store_true",
         help="Disable real-time output streaming (capture output instead)"
     )
+    parser.add_argument(
+        "--max-hours",
+        type=float,
+        help="Maximum hours to run in continuous mode (e.g., 1 for 1 hour)"
+    )
 
     args = parser.parse_args()
 
@@ -911,7 +949,7 @@ Examples:
 
     # Run specified mode
     if args.continuous:
-        orchestra.run_continuous(max_cycles=args.max_cycles)
+        orchestra.run_continuous(max_cycles=args.max_cycles, max_hours=args.max_hours)
     elif args.cycle:
         results = orchestra.run_full_cycle(max_review_iterations=args.max_review_iterations)
         print("\n" + "=" * 60)
