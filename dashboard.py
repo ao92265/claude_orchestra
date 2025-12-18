@@ -164,16 +164,33 @@ HTML_TEMPLATE = """
             text-align: center;
             font-size: 12px;
             border: 2px solid transparent;
+            position: relative;
         }
         .stage-item.active {
             border-color: #58a6ff;
             background: #1f6feb20;
+            animation: pulse 2s infinite;
         }
         .stage-item.completed {
             border-color: #238636;
             background: #23863620;
         }
+        .stage-item.idle {
+            opacity: 0.6;
+        }
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.4); }
+            50% { box-shadow: 0 0 0 8px rgba(88, 166, 255, 0); }
+        }
         .stage-icon { font-size: 20px; margin-bottom: 5px; }
+        .stage-status {
+            font-size: 10px;
+            color: #8b949e;
+            margin-top: 4px;
+            text-transform: uppercase;
+        }
+        .stage-status.running { color: #58a6ff; font-weight: 600; }
+        .stage-status.done { color: #238636; }
         .controls {
             display: flex;
             gap: 10px;
@@ -226,11 +243,13 @@ HTML_TEMPLATE = """
         <div class="controls">
             <input type="text" id="projectPath" placeholder="Project path (e.g., /Users/you/project)" value="">
             <select id="maxHours">
+                <option value="0">Indefinite</option>
                 <option value="0.5">30 minutes</option>
                 <option value="1" selected>1 hour</option>
                 <option value="2">2 hours</option>
                 <option value="4">4 hours</option>
                 <option value="8">8 hours</option>
+                <option value="24">24 hours</option>
             </select>
             <button class="primary" id="startBtn" onclick="startOrchestra()">Start Orchestra</button>
             <button class="danger" id="stopBtn" onclick="stopOrchestra()" disabled>Stop</button>
@@ -257,23 +276,27 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="card" style="margin-bottom: 20px;">
-            <div class="card-title">Pipeline Stage</div>
+            <div class="card-title">Agent Pipeline</div>
             <div class="stage-pipeline">
-                <div class="stage-item" id="stage-implement">
+                <div class="stage-item idle" id="stage-implement">
                     <div class="stage-icon">🔨</div>
                     Implementer
+                    <div class="stage-status" id="status-implement">Idle</div>
                 </div>
-                <div class="stage-item" id="stage-test">
+                <div class="stage-item idle" id="stage-test">
                     <div class="stage-icon">🧪</div>
                     Tester
+                    <div class="stage-status" id="status-test">Idle</div>
                 </div>
-                <div class="stage-item" id="stage-review">
+                <div class="stage-item idle" id="stage-review">
                     <div class="stage-icon">👀</div>
                     Reviewer
+                    <div class="stage-status" id="status-review">Idle</div>
                 </div>
-                <div class="stage-item" id="stage-plan">
+                <div class="stage-item idle" id="stage-plan">
                     <div class="stage-icon">📋</div>
                     Planner
+                    <div class="stage-status" id="status-plan">Idle</div>
                 </div>
             </div>
         </div>
@@ -332,19 +355,34 @@ HTML_TEMPLATE = """
                 document.getElementById('projectPath').value = state.project_path;
             }
 
-            // Update stage highlights
+            // Update stage highlights and statuses
             var stages = ['implement', 'test', 'review', 'plan'];
-            stages.forEach(function(s) {
-                document.getElementById('stage-' + s).className = 'stage-item';
+            var stageOrder = {'implement': 0, 'test': 1, 'review': 2, 'plan': 3};
+            var currentIdx = state.current_stage ? stageOrder[state.current_stage] : -1;
+
+            stages.forEach(function(s, idx) {
+                var stageEl = document.getElementById('stage-' + s);
+                var statusEl = document.getElementById('status-' + s);
+                stageEl.className = 'stage-item';
+
+                if (state.current_stage === s) {
+                    stageEl.classList.add('active');
+                    statusEl.textContent = 'Running...';
+                    statusEl.className = 'stage-status running';
+                } else if (currentIdx > idx) {
+                    stageEl.classList.add('completed');
+                    statusEl.textContent = 'Done';
+                    statusEl.className = 'stage-status done';
+                } else {
+                    stageEl.classList.add('idle');
+                    statusEl.textContent = 'Idle';
+                    statusEl.className = 'stage-status';
+                }
             });
-            if (state.current_stage) {
-                var stageEl = document.getElementById('stage-' + state.current_stage);
-                if (stageEl) stageEl.classList.add('active');
-            }
 
             if (state.running && state.start_time) {
                 startTime = new Date(state.start_time);
-                maxSeconds = state.max_hours * 3600;
+                maxSeconds = state.max_hours ? state.max_hours * 3600 : null;
                 if (!timerInterval) {
                     timerInterval = setInterval(updateTimer, 1000);
                 }
@@ -366,15 +404,24 @@ HTML_TEMPLATE = """
         function updateTimer() {
             if (!startTime) return;
             var elapsed = Math.floor((Date.now() - startTime) / 1000);
-            var mins = Math.floor(elapsed / 60);
+            var hours = Math.floor(elapsed / 3600);
+            var mins = Math.floor((elapsed % 3600) / 60);
             var secs = elapsed % 60;
-            document.getElementById('timeElapsed').textContent =
-                String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+
+            if (hours > 0) {
+                document.getElementById('timeElapsed').textContent =
+                    hours + ':' + String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+            } else {
+                document.getElementById('timeElapsed').textContent =
+                    String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+            }
 
             if (maxSeconds) {
                 var remaining = Math.max(0, maxSeconds - elapsed);
                 var remMins = Math.floor(remaining / 60);
                 document.getElementById('timeRemaining').textContent = remMins + ' min remaining';
+            } else {
+                document.getElementById('timeRemaining').textContent = 'Running indefinitely';
             }
         }
 
@@ -521,7 +568,10 @@ def handle_start(data):
 
     emit('state_update', orchestra_state)
     emit('log_line', {'line': 'Starting Claude Orchestra on ' + project_path})
-    emit('log_line', {'line': 'Max runtime: ' + str(max_hours) + ' hour(s)'})
+    if max_hours:
+        emit('log_line', {'line': 'Max runtime: ' + str(max_hours) + ' hour(s)'})
+    else:
+        emit('log_line', {'line': 'Running indefinitely (until stopped)'})
 
     def run_orchestra():
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -534,9 +584,13 @@ def handle_start(data):
             os.path.join(script_dir, 'claude_orchestra.py'),
             '--project', project_path,
             '--continuous',
-            '--max-hours', str(max_hours),
-            '--timeout', '600'
+            '--timeout', '600',
+            '--max-cycles', '1000'  # High limit, will stop on time or manual stop
         ]
+
+        # Only add max-hours if not indefinite
+        if orchestra_state["max_hours"]:
+            cmd.extend(['--max-hours', str(orchestra_state["max_hours"])])
 
         orchestra_state["process"] = subprocess.Popen(
             cmd,
@@ -567,6 +621,7 @@ def handle_start(data):
                     pass
             elif 'Cycle' in line and 'complete' in line:
                 orchestra_state["cycles_completed"] += 1
+                orchestra_state["current_stage"] = None  # Reset for next cycle
 
             socketio.emit('state_update', orchestra_state)
 
