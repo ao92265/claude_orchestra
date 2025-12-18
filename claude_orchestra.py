@@ -80,13 +80,15 @@ class ClaudeOrchestra:
         todo_file: str = "TODO.md",
         timeout: int = 1800,  # 30 minutes default per agent
         model: str = "sonnet",  # or "opus" for more complex tasks
-        stream: bool = True  # Stream output in real-time
+        stream: bool = True,  # Stream output in real-time
+        task_mode: str = "normal"  # "small", "normal", or "large"
     ):
         self.project_path = Path(project_path).resolve()
         self.todo_file = self.project_path / todo_file
         self.timeout = timeout
         self.model = model
         self.stream = stream
+        self.task_mode = task_mode
 
         # Validate project path
         if not self.project_path.exists():
@@ -367,17 +369,29 @@ class ClaudeOrchestra:
         This agent reads the TODO list, selects the highest priority task,
         implements it, and creates a feature branch with the changes.
         """
+        # Build task guidance based on mode
+        if self.task_mode == "small":
+            task_guidance = """IMPORTANT: Choose tasks that can realistically be completed in under 20 minutes.
+Skip very large tasks (like "Super Admin Portal" or "Full System Redesign") and pick smaller, focused tasks instead.
+If all remaining tasks are too large, break one down into subtasks and implement just the first subtask."""
+        elif self.task_mode == "large":
+            task_guidance = """You are authorized to work on LARGE, complex tasks. Take your time and be thorough.
+Select the highest priority task from TODO.md regardless of size - even multi-file features are fine.
+For very large tasks, implement them systematically, committing progress as you go.
+You have plenty of time, so focus on quality and completeness."""
+        else:  # normal
+            task_guidance = """Select appropriately sized tasks - not trivial one-liners, but not massive multi-day features either.
+If a task seems very large, consider implementing a meaningful subset and noting what remains."""
+
         prompt = f"""You are the IMPLEMENTER agent in an autonomous development pipeline.
 
 Your task: Read the TODO.md file, select the highest priority incomplete task, and implement it.
 
-IMPORTANT: Choose tasks that can realistically be completed in under 20 minutes.
-Skip very large tasks (like "Super Admin Portal" or "Full System Redesign") and pick smaller, focused tasks instead.
-If all remaining tasks are too large, break one down into subtasks and implement just the first subtask.
+{task_guidance}
 
 Instructions:
 1. Read TODO.md to find incomplete tasks (marked with [ ] or similar)
-2. Select a SMALL, focused task (not a huge multi-day feature)
+2. Select the most appropriate task based on priority and the guidance above
 3. IMMEDIATELY mark the task as in-progress in TODO.md and commit this change
 4. Create a new feature branch with a descriptive name
 5. Implement the feature/fix thoroughly
@@ -391,7 +405,6 @@ Instructions:
 {f"Specific task to implement: {task_description}" if task_description else ""}
 
 Work autonomously until the implementation is complete. Be thorough but pragmatic.
-If a task is too large, implement just one piece of it and note what remains.
 """
 
         result = self._run_claude(prompt)
@@ -906,14 +919,20 @@ Examples:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=600,
-        help="Timeout per agent in seconds (default: 600)"
+        default=1800,
+        help="Timeout per agent in seconds (default: 1800 = 30 min)"
     )
     parser.add_argument(
         "--model",
         choices=["sonnet", "opus", "haiku"],
         default="sonnet",
         help="Claude model to use (default: sonnet)"
+    )
+    parser.add_argument(
+        "--task-mode",
+        choices=["small", "normal", "large"],
+        default="normal",
+        help="Task size mode: small (quick fixes), normal (balanced), large (big features)"
     )
     parser.add_argument(
         "--init-todo",
@@ -952,7 +971,8 @@ Examples:
             project_path=str(project_path),
             timeout=args.timeout,
             model=args.model,
-            stream=not args.no_stream
+            stream=not args.no_stream,
+            task_mode=args.task_mode
         )
     except ValueError as e:
         logger.error(str(e))
