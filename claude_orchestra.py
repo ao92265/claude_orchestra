@@ -78,7 +78,7 @@ class ClaudeOrchestra:
         self,
         project_path: str,
         todo_file: str = "TODO.md",
-        timeout: int = 600,  # 10 minutes default per agent
+        timeout: int = 1800,  # 30 minutes default per agent
         model: str = "sonnet",  # or "opus" for more complex tasks
         stream: bool = True  # Stream output in real-time
     ):
@@ -371,14 +371,19 @@ class ClaudeOrchestra:
 
 Your task: Read the TODO.md file, select the highest priority incomplete task, and implement it.
 
+IMPORTANT: Choose tasks that can realistically be completed in under 20 minutes.
+Skip very large tasks (like "Super Admin Portal" or "Full System Redesign") and pick smaller, focused tasks instead.
+If all remaining tasks are too large, break one down into subtasks and implement just the first subtask.
+
 Instructions:
 1. Read TODO.md to find incomplete tasks (marked with [ ] or similar)
-2. Select the most important/urgent task
-3. Create a new feature branch with a descriptive name
-4. Implement the feature/fix thoroughly
-5. Mark the task as in-progress in TODO.md
-6. Commit your changes with clear commit messages
-7. When done, output a summary including:
+2. Select a SMALL, focused task (not a huge multi-day feature)
+3. IMMEDIATELY mark the task as in-progress in TODO.md and commit this change
+4. Create a new feature branch with a descriptive name
+5. Implement the feature/fix thoroughly
+6. Mark the task as complete in TODO.md
+7. Commit your changes with clear commit messages
+8. When done, output a summary including:
    - BRANCH_NAME: <the branch you created>
    - TASK_COMPLETED: <description of what was implemented>
    - FILES_CHANGED: <list of modified files>
@@ -386,6 +391,7 @@ Instructions:
 {f"Specific task to implement: {task_description}" if task_description else ""}
 
 Work autonomously until the implementation is complete. Be thorough but pragmatic.
+If a task is too large, implement just one piece of it and note what remains.
 """
 
         result = self._run_claude(prompt)

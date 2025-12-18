@@ -588,7 +588,7 @@ def handle_start(data):
             os.path.join(script_dir, 'claude_orchestra.py'),
             '--project', project_path,
             '--continuous',
-            '--timeout', '600',
+            '--timeout', '1800',  # 30 minutes per agent
             '--max-cycles', '1000'  # High limit, will stop on time or manual stop
         ]
 
