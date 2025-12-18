@@ -102,13 +102,22 @@ class ClaudeOrchestra:
         """
         cwd = working_dir or self.project_path
 
-        cmd = [
-            "claude",
-            "-p", prompt,  # Headless mode with prompt
-            "--dangerously-skip-permissions",  # Autonomous execution
-            "--model", self.model,
-            "--output-format", "text"  # Get clean text output
-        ]
+        if self.stream:
+            cmd = [
+                "claude",
+                "-p", prompt,
+                "--dangerously-skip-permissions",
+                "--model", self.model,
+                "--output-format", "stream-json"  # Stream events as they happen
+            ]
+        else:
+            cmd = [
+                "claude",
+                "-p", prompt,
+                "--dangerously-skip-permissions",
+                "--model", self.model,
+                "--output-format", "text"
+            ]
 
         logger.info(f"Running Claude with prompt: {prompt[:100]}...")
 
@@ -118,13 +127,13 @@ class ClaudeOrchestra:
             return self._run_claude_captured(cmd, cwd)
 
     def _run_claude_streaming(self, cmd: list, cwd: Path) -> AgentResult:
-        """Run Claude with real-time output streaming to terminal using threads."""
+        """Run Claude with real-time streaming using stream-json format."""
         import threading
         import queue
 
-        output_lines = []
-        error_lines = []
         output_queue = queue.Queue()
+        full_output = []
+        result_text = ""
         start_time = time.time()
 
         def read_stream(stream, stream_type):
@@ -132,10 +141,64 @@ class ClaudeOrchestra:
             try:
                 for line in iter(stream.readline, ''):
                     if line:
-                        output_queue.put((stream_type, line))
+                        output_queue.put((stream_type, line.strip()))
                 stream.close()
             except Exception:
                 pass
+
+        def parse_and_display(line):
+            """Parse stream-json event and display relevant info."""
+            nonlocal result_text
+            try:
+                event = json.loads(line)
+                event_type = event.get("type", "")
+
+                # Assistant text output
+                if event_type == "assistant":
+                    msg = event.get("message", {})
+                    for block in msg.get("content", []):
+                        if block.get("type") == "text":
+                            text = block.get("text", "")
+                            print(f"  {text}", flush=True)
+                            result_text += text + "\n"
+
+                # Text being generated (streaming delta)
+                elif event_type == "content_block_delta":
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        print(text, end="", flush=True)
+                        result_text += text
+
+                # Tool use (shows what Claude is doing)
+                elif event_type == "tool_use":
+                    tool_name = event.get("name", "unknown")
+                    print(f"\n  [TOOL] {tool_name}", flush=True)
+
+                # Content block start
+                elif event_type == "content_block_start":
+                    block = event.get("content_block", {})
+                    if block.get("type") == "tool_use":
+                        tool_name = block.get("name", "")
+                        print(f"\n  [TOOL] Using: {tool_name}", flush=True)
+                    elif block.get("type") == "text":
+                        pass  # Text blocks handled by delta
+
+                # System messages
+                elif event_type == "system":
+                    print(f"  [SYSTEM] {event.get('message', '')}", flush=True)
+
+                # Result/final message
+                elif event_type == "result":
+                    result_text = event.get("result", result_text)
+
+                return True
+            except json.JSONDecodeError:
+                # Not JSON, just print raw
+                print(f"  {line}", flush=True)
+                return True
+            except Exception as e:
+                return True
 
         try:
             process = subprocess.Popen(
@@ -148,7 +211,7 @@ class ClaudeOrchestra:
             )
 
             print("\n" + "=" * 60)
-            print("CLAUDE OUTPUT (streaming)")
+            print("CLAUDE WORKING (live stream)")
             print("=" * 60 + "\n")
 
             # Start reader threads
@@ -159,10 +222,9 @@ class ClaudeOrchestra:
             stdout_thread.start()
             stderr_thread.start()
 
-            # Print output as it arrives
-            last_print = time.time()
+            # Process output as it arrives
+            last_activity = time.time()
             while True:
-                # Check timeout
                 elapsed = time.time() - start_time
                 if elapsed > self.timeout:
                     process.kill()
@@ -171,40 +233,34 @@ class ClaudeOrchestra:
                     return AgentResult(
                         role=AgentRole.IMPLEMENTER,
                         success=False,
-                        output="\n".join(output_lines),
+                        output=result_text,
                         error=f"Execution timed out after {self.timeout} seconds"
                     )
 
-                # Print progress indicator every 30 seconds
-                if time.time() - last_print > 30:
-                    print(f"  ... still working ({int(elapsed)}s elapsed)", flush=True)
-                    last_print = time.time()
+                # Show heartbeat every 30s of no activity
+                if time.time() - last_activity > 30:
+                    print(f"\n  ... working ({int(elapsed)}s) ...", flush=True)
+                    last_activity = time.time()
 
-                # Try to get output from queue
                 try:
                     stream_type, line = output_queue.get(timeout=0.5)
-                    if stream_type == 'stdout':
-                        print(f"  {line}", end="", flush=True)
-                        output_lines.append(line.rstrip())
-                    else:
-                        print(f"  [stderr] {line}", end="", flush=True)
-                        error_lines.append(line.rstrip())
-                    last_print = time.time()
+                    last_activity = time.time()
+                    if stream_type == 'stdout' and line:
+                        full_output.append(line)
+                        parse_and_display(line)
+                    elif stream_type == 'stderr' and line:
+                        print(f"  [stderr] {line}", flush=True)
                 except queue.Empty:
                     pass
 
-                # Check if process finished and threads done
+                # Check if done
                 if process.poll() is not None and not stdout_thread.is_alive() and not stderr_thread.is_alive():
-                    # Drain any remaining items from queue
                     while not output_queue.empty():
                         try:
                             stream_type, line = output_queue.get_nowait()
-                            if stream_type == 'stdout':
-                                print(f"  {line}", end="", flush=True)
-                                output_lines.append(line.rstrip())
-                            else:
-                                print(f"  [stderr] {line}", end="", flush=True)
-                                error_lines.append(line.rstrip())
+                            if stream_type == 'stdout' and line:
+                                full_output.append(line)
+                                parse_and_display(line)
                         except queue.Empty:
                             break
                     break
@@ -215,19 +271,16 @@ class ClaudeOrchestra:
             print("=" * 60 + "\n")
 
             success = process.returncode == 0
-            output = "\n".join(output_lines)
-            error = "\n".join(error_lines) if error_lines and not success else None
-
             if success:
                 logger.info("Claude execution completed successfully")
             else:
-                logger.error(f"Claude execution failed: {error}")
+                logger.error(f"Claude execution failed with code {process.returncode}")
 
             return AgentResult(
                 role=AgentRole.IMPLEMENTER,
                 success=success,
-                output=output,
-                error=error
+                output=result_text or "\n".join(full_output),
+                error=None if success else f"Exit code: {process.returncode}"
             )
 
         except FileNotFoundError:
