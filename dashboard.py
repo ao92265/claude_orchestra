@@ -260,6 +260,11 @@ HTML_TEMPLATE = """
                 <option value="normal" selected>Normal</option>
                 <option value="large">Large Features</option>
             </select>
+            <select id="modelSelect">
+                <option value="haiku">Haiku (Fast)</option>
+                <option value="sonnet" selected>Sonnet (Balanced)</option>
+                <option value="opus">Opus (Most Capable)</option>
+            </select>
             <button class="primary" id="startBtn" onclick="startOrchestra()">Start Orchestra</button>
             <button class="danger" id="stopBtn" onclick="stopOrchestra()" disabled>Stop</button>
         </div>
@@ -489,6 +494,7 @@ HTML_TEMPLATE = """
             var projectPath = document.getElementById('projectPath').value;
             var maxHours = document.getElementById('maxHours').value;
             var taskMode = document.getElementById('taskMode').value;
+            var model = document.getElementById('modelSelect').value;
 
             if (!projectPath) {
                 alert('Please enter a project path');
@@ -498,7 +504,8 @@ HTML_TEMPLATE = """
             socket.emit('start_orchestra', {
                 project_path: projectPath,
                 max_hours: parseFloat(maxHours),
-                task_mode: taskMode
+                task_mode: taskMode,
+                model: model
             });
         }
 
@@ -564,6 +571,7 @@ def handle_start(data):
     project_path = data.get('project_path')
     max_hours = data.get('max_hours', 1)
     task_mode = data.get('task_mode', 'normal')
+    model = data.get('model', 'sonnet')
 
     if not project_path or not os.path.exists(project_path):
         emit('log_line', {'line': 'Error: Invalid project path: ' + str(project_path)})
@@ -574,6 +582,7 @@ def handle_start(data):
     orchestra_state["start_time"] = datetime.now().isoformat()
     orchestra_state["max_hours"] = max_hours
     orchestra_state["task_mode"] = task_mode
+    orchestra_state["model"] = model
     orchestra_state["current_cycle"] = 0
     orchestra_state["cycles_completed"] = 0
     orchestra_state["prs_created"] = []
@@ -581,7 +590,7 @@ def handle_start(data):
 
     emit('state_update', get_serializable_state())
     emit('log_line', {'line': 'Starting Claude Orchestra on ' + project_path})
-    emit('log_line', {'line': 'Task mode: ' + task_mode.upper()})
+    emit('log_line', {'line': 'Task mode: ' + task_mode.upper() + ' | Model: ' + model.upper()})
     if max_hours:
         emit('log_line', {'line': 'Max runtime: ' + str(max_hours) + ' hour(s)'})
     else:
@@ -606,8 +615,9 @@ def handle_start(data):
         if orchestra_state["max_hours"]:
             cmd.extend(['--max-hours', str(orchestra_state["max_hours"])])
 
-        # Add task mode
+        # Add task mode and model
         cmd.extend(['--task-mode', orchestra_state.get("task_mode", "normal")])
+        cmd.extend(['--model', orchestra_state.get("model", "sonnet")])
 
         orchestra_state["process"] = subprocess.Popen(
             cmd,
