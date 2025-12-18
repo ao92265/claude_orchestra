@@ -118,10 +118,24 @@ class ClaudeOrchestra:
             return self._run_claude_captured(cmd, cwd)
 
     def _run_claude_streaming(self, cmd: list, cwd: Path) -> AgentResult:
-        """Run Claude with real-time output streaming to terminal."""
+        """Run Claude with real-time output streaming to terminal using threads."""
+        import threading
+        import queue
+
         output_lines = []
         error_lines = []
+        output_queue = queue.Queue()
         start_time = time.time()
+
+        def read_stream(stream, stream_type):
+            """Read from stream and put lines into queue."""
+            try:
+                for line in iter(stream.readline, ''):
+                    if line:
+                        output_queue.put((stream_type, line))
+                stream.close()
+            except Exception:
+                pass
 
         try:
             process = subprocess.Popen(
@@ -130,17 +144,27 @@ class ClaudeOrchestra:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                bufsize=1  # Line buffered
+                bufsize=1
             )
 
             print("\n" + "=" * 60)
             print("CLAUDE OUTPUT (streaming)")
             print("=" * 60 + "\n")
 
-            # Read stdout and stderr in real-time
+            # Start reader threads
+            stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, 'stdout'))
+            stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, 'stderr'))
+            stdout_thread.daemon = True
+            stderr_thread.daemon = True
+            stdout_thread.start()
+            stderr_thread.start()
+
+            # Print output as it arrives
+            last_print = time.time()
             while True:
                 # Check timeout
-                if time.time() - start_time > self.timeout:
+                elapsed = time.time() - start_time
+                if elapsed > self.timeout:
                     process.kill()
                     process.wait()
                     logger.error(f"Claude execution timed out after {self.timeout}s")
@@ -151,37 +175,39 @@ class ClaudeOrchestra:
                         error=f"Execution timed out after {self.timeout} seconds"
                     )
 
-                # Check if process has finished
-                retcode = process.poll()
+                # Print progress indicator every 30 seconds
+                if time.time() - last_print > 30:
+                    print(f"  ... still working ({int(elapsed)}s elapsed)", flush=True)
+                    last_print = time.time()
 
-                # Read available output
-                if process.stdout:
-                    line = process.stdout.readline()
-                    if line:
+                # Try to get output from queue
+                try:
+                    stream_type, line = output_queue.get(timeout=0.5)
+                    if stream_type == 'stdout':
                         print(f"  {line}", end="", flush=True)
                         output_lines.append(line.rstrip())
+                    else:
+                        print(f"  [stderr] {line}", end="", flush=True)
+                        error_lines.append(line.rstrip())
+                    last_print = time.time()
+                except queue.Empty:
+                    pass
 
-                if process.stderr:
-                    err_line = process.stderr.readline()
-                    if err_line:
-                        print(f"  [stderr] {err_line}", end="", flush=True)
-                        error_lines.append(err_line.rstrip())
-
-                # If process finished and no more output, break
-                if retcode is not None:
-                    # Drain remaining output
-                    remaining_out, remaining_err = process.communicate()
-                    if remaining_out:
-                        for line in remaining_out.splitlines():
-                            print(f"  {line}")
-                            output_lines.append(line)
-                    if remaining_err:
-                        for line in remaining_err.splitlines():
-                            print(f"  [stderr] {line}")
-                            error_lines.append(line)
+                # Check if process finished and threads done
+                if process.poll() is not None and not stdout_thread.is_alive() and not stderr_thread.is_alive():
+                    # Drain any remaining items from queue
+                    while not output_queue.empty():
+                        try:
+                            stream_type, line = output_queue.get_nowait()
+                            if stream_type == 'stdout':
+                                print(f"  {line}", end="", flush=True)
+                                output_lines.append(line.rstrip())
+                            else:
+                                print(f"  [stderr] {line}", end="", flush=True)
+                                error_lines.append(line.rstrip())
+                        except queue.Empty:
+                            break
                     break
-
-                time.sleep(0.1)  # Small sleep to prevent busy-waiting
 
             print("\n" + "=" * 60)
             elapsed = time.time() - start_time
