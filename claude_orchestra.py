@@ -108,7 +108,8 @@ class ClaudeOrchestra:
                 "-p", prompt,
                 "--dangerously-skip-permissions",
                 "--model", self.model,
-                "--output-format", "stream-json"  # Stream events as they happen
+                "--output-format", "stream-json",
+                "--verbose"  # Required for stream-json with -p
             ]
         else:
             cmd = [
