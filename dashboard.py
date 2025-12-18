@@ -31,6 +31,10 @@ orchestra_state = {
     "process": None
 }
 
+def get_serializable_state():
+    """Return state dict without non-serializable objects (like Popen)."""
+    return {k: v for k, v in orchestra_state.items() if k != "process"}
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -522,7 +526,7 @@ def check_prs(project_path, socketio):
                         }
                         orchestra_state["prs_created"].append(pr_data)
                         socketio.emit('pr_created', pr_data)
-                        socketio.emit('state_update', orchestra_state)
+                        socketio.emit('state_update', get_serializable_state())
         except Exception as e:
             pass
         time.sleep(30)
@@ -533,15 +537,15 @@ def index():
 
 @app.route('/api/state')
 def get_state():
-    return jsonify(orchestra_state)
+    return jsonify(get_serializable_state())
 
 @socketio.on('connect')
 def handle_connect():
-    emit('state_update', orchestra_state)
+    emit('state_update', get_serializable_state())
 
 @socketio.on('get_state')
 def handle_get_state():
-    emit('state_update', orchestra_state)
+    emit('state_update', get_serializable_state())
 
 @socketio.on('start_orchestra')
 def handle_start(data):
@@ -566,7 +570,7 @@ def handle_start(data):
     orchestra_state["prs_created"] = []
     orchestra_state["log_lines"] = []
 
-    emit('state_update', orchestra_state)
+    emit('state_update', get_serializable_state())
     emit('log_line', {'line': 'Starting Claude Orchestra on ' + project_path})
     if max_hours:
         emit('log_line', {'line': 'Max runtime: ' + str(max_hours) + ' hour(s)'})
@@ -643,11 +647,11 @@ def handle_start(data):
                     orchestra_state["cycles_completed"] += 1
                     orchestra_state["current_stage"] = None  # Reset for next cycle
 
-                socketio.emit('state_update', orchestra_state)
+                socketio.emit('state_update', get_serializable_state())
 
         orchestra_state["running"] = False
         orchestra_state["current_stage"] = None
-        socketio.emit('state_update', orchestra_state)
+        socketio.emit('state_update', get_serializable_state())
         socketio.emit('log_line', {'line': 'Orchestra stopped'})
 
     thread = threading.Thread(target=run_orchestra)
@@ -664,7 +668,7 @@ def handle_stop():
     orchestra_state["running"] = False
     if orchestra_state.get("process"):
         orchestra_state["process"].terminate()
-    emit('state_update', orchestra_state)
+    emit('state_update', get_serializable_state())
     emit('log_line', {'line': 'Stopping orchestra...'})
 
 if __name__ == '__main__':
