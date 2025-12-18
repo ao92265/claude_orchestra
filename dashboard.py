@@ -597,33 +597,53 @@ def handle_start(data):
             cwd=script_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True
+            text=True,
+            bufsize=1  # Line buffered for real-time output
         )
 
-        for line in orchestra_state["process"].stdout:
-            if not orchestra_state["running"]:
+        # Use select for non-blocking reads to allow stop button to work
+        import select
+        while orchestra_state["running"]:
+            # Check if process ended
+            if orchestra_state["process"].poll() is not None:
+                # Process ended, read remaining output
+                remaining = orchestra_state["process"].stdout.read()
+                if remaining:
+                    for line in remaining.split('\n'):
+                        if line.strip():
+                            socketio.emit('log_line', {'line': line.strip()})
                 break
-            socketio.emit('log_line', {'line': line.strip()})
 
-            if '[STAGE 1]' in line:
-                orchestra_state["current_stage"] = "implement"
-            elif '[STAGE 2]' in line:
-                orchestra_state["current_stage"] = "test"
-            elif '[STAGE 3]' in line:
-                orchestra_state["current_stage"] = "review"
-            elif '[STAGE 4]' in line:
-                orchestra_state["current_stage"] = "plan"
-            elif 'CYCLE' in line and '/' in line:
-                try:
-                    cycle = int(line.split('CYCLE')[1].split('/')[0].strip())
-                    orchestra_state["current_cycle"] = cycle
-                except:
-                    pass
-            elif 'Cycle' in line and 'complete' in line:
-                orchestra_state["cycles_completed"] += 1
-                orchestra_state["current_stage"] = None  # Reset for next cycle
+            # Non-blocking check if data is available (0.5s timeout)
+            ready, _, _ = select.select([orchestra_state["process"].stdout], [], [], 0.5)
+            if not ready:
+                continue  # No data, loop again to check running flag
 
-            socketio.emit('state_update', orchestra_state)
+            line = orchestra_state["process"].stdout.readline()
+            if line:
+                line_text = line.strip()
+                socketio.emit('log_line', {'line': line_text})
+
+                # Parse stage transitions
+                if '[STAGE 1]' in line_text or 'IMPLEMENTER' in line_text.upper():
+                    orchestra_state["current_stage"] = "implement"
+                elif '[STAGE 2]' in line_text or 'TESTER' in line_text.upper():
+                    orchestra_state["current_stage"] = "test"
+                elif '[STAGE 3]' in line_text or 'REVIEWER' in line_text.upper():
+                    orchestra_state["current_stage"] = "review"
+                elif '[STAGE 4]' in line_text or 'PLANNER' in line_text.upper():
+                    orchestra_state["current_stage"] = "plan"
+                elif 'CYCLE' in line_text and '/' in line_text:
+                    try:
+                        cycle = int(line_text.split('CYCLE')[1].split('/')[0].strip())
+                        orchestra_state["current_cycle"] = cycle
+                    except:
+                        pass
+                elif 'Cycle' in line_text and 'complete' in line_text:
+                    orchestra_state["cycles_completed"] += 1
+                    orchestra_state["current_stage"] = None  # Reset for next cycle
+
+                socketio.emit('state_update', orchestra_state)
 
         orchestra_state["running"] = False
         orchestra_state["current_stage"] = None
