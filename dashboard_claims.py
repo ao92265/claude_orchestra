@@ -343,7 +343,7 @@ def _test_github_connection_sync() -> Dict:
 
 
 def _sync_todos_sync(project_path: str) -> Dict:
-    """Sync TODOs synchronously."""
+    """Sync TODOs synchronously with timeout."""
     try:
         from task_coordinator import TaskCoordinator
 
@@ -352,7 +352,7 @@ def _sync_todos_sync(project_path: str) -> Dict:
                 repo_owner=_setup_state['repo_owner'],
                 repo_name=_setup_state['repo_name'],
                 github_token=_setup_state['github_token'],
-                project_path=project_path,  # Pass project path for TODO.md location
+                project_path=project_path,
                 claim_timeout=_setup_state['claim_timeout']
             )
             await coordinator.setup()
@@ -369,13 +369,20 @@ def _sync_todos_sync(project_path: str) -> Dict:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            return loop.run_until_complete(sync())
+            # Add 5 minute timeout to prevent infinite hangs
+            future = asyncio.ensure_future(sync(), loop=loop)
+            return loop.run_until_complete(
+                asyncio.wait_for(future, timeout=300.0)
+            )
+        except asyncio.TimeoutError:
+            return {'success': False, 'error': 'Sync timed out after 5 minutes. Try syncing fewer tasks.'}
         finally:
             loop.close()
 
     except ImportError:
         return {'success': False, 'error': 'task_coordinator module not found'}
     except Exception as e:
+        logger.error(f"Sync error: {e}")
         return {'success': False, 'error': str(e)}
 
 

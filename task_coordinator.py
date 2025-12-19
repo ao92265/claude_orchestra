@@ -639,8 +639,8 @@ class TaskCoordinator:
                     result.created += 1
                     logger.info(f"Created issue [{priority}]: {task_title}")
 
-                    # Small delay to avoid rate limits
-                    await asyncio.sleep(0.5)
+                    # Small delay to avoid rate limits (0.1s = 600/min, well under limit)
+                    await asyncio.sleep(0.1)
 
             except Exception as e:
                 error_msg = f"Error syncing task '{task_title}': {e}"
