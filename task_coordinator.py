@@ -9,6 +9,7 @@ on the same repository without conflicts.
 
 import os
 import re
+import ssl
 import asyncio
 import hashlib
 import logging
@@ -19,6 +20,14 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 import aiohttp
 import socket
+
+# Try to use certifi for SSL certificates (needed on macOS)
+try:
+    import certifi
+    SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    # Fall back to default SSL context
+    SSL_CONTEXT = ssl.create_default_context()
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +231,10 @@ class GitHubClient:
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
         if self._session is None or self._session.closed:
+            # Use TCPConnector with SSL context to fix macOS certificate issues
+            connector = aiohttp.TCPConnector(ssl=SSL_CONTEXT)
             self._session = aiohttp.ClientSession(
+                connector=connector,
                 headers={
                     "Authorization": f"token {self.token}",
                     "Accept": "application/vnd.github.v3+json",

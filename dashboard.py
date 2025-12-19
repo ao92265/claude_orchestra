@@ -2724,13 +2724,43 @@ HTML_TEMPLATE = """
             if (content.classList.contains('expanded')) {
                 socket.emit('get_multiuser_config');
                 refreshClaims();
+
+                // Auto-detect repo from current project
+                const projectPath = getCurrentProjectPath();
+                if (projectPath) {
+                    socket.emit('get_repo_from_project', { project_path: projectPath });
+                }
             }
+        }
+
+        // Get current project path from either running or pending projects
+        function getCurrentProjectPath() {
+            // Check running projects first
+            if (projectsData[currentProjectId]) {
+                return projectsData[currentProjectId].project_path;
+            }
+            // Check pending projects
+            if (pendingProjects[currentProjectId]) {
+                return pendingProjects[currentProjectId].path;
+            }
+            return null;
         }
 
         // Socket handlers for multi-user mode
         socket.on('multiuser_config', function(data) {
             multiuserConfig = data;
             updateConfigUI();
+        });
+
+        // Handle auto-detected repo from project
+        socket.on('project_repo', function(data) {
+            if (data.success && data.repo) {
+                const repoInput = document.getElementById('github-repo');
+                // Only auto-fill if empty or same as before
+                if (!repoInput.value || repoInput.value === multiuserConfig.repo) {
+                    repoInput.value = data.repo;
+                }
+            }
         });
 
         socket.on('connection_result', function(data) {
@@ -2856,7 +2886,10 @@ HTML_TEMPLATE = """
             const btn = document.getElementById('sync-btn');
             btn.disabled = true;
             btn.innerHTML = '<span class="spinner"></span> Syncing...';
-            socket.emit('sync_todos');
+
+            // Include project path so sync knows where TODO.md is
+            const projectPath = getCurrentProjectPath();
+            socket.emit('sync_todos', { project_path: projectPath });
         }
 
         function refreshClaims() {

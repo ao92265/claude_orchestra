@@ -42,7 +42,8 @@ _setup_state = {
     'heartbeat_interval': 300,
     'last_sync': None,
     'connection_tested': False,
-    'github_username': None
+    'github_username': None,
+    'project_path': None  # Current project path for TODO sync
 }
 
 
@@ -118,7 +119,7 @@ def register_claims_handlers(socketio, app, coordinator=None, config=None):
             emit('connection_result', {'success': False, 'error': str(e)})
 
     @socketio.on('sync_todos')
-    def handle_sync_todos():
+    def handle_sync_todos(data=None):
         """Sync TODO.md to GitHub Issues."""
         from flask_socketio import emit
         global _setup_state
@@ -127,8 +128,17 @@ def register_claims_handlers(socketio, app, coordinator=None, config=None):
             emit('sync_result', {'success': False, 'error': 'Multi-user mode not configured'})
             return
 
+        # Get project path from data or use stored path
+        project_path = (data or {}).get('project_path') or _setup_state.get('project_path')
+        if not project_path:
+            emit('sync_result', {'success': False, 'error': 'No project path specified'})
+            return
+
+        # Store for future use
+        _setup_state['project_path'] = project_path
+
         try:
-            result = _sync_todos_sync()
+            result = _sync_todos_sync(project_path)
             if result['success']:
                 _setup_state['last_sync'] = datetime.now(timezone.utc).isoformat()
             emit('sync_result', result)
@@ -182,12 +192,73 @@ def register_claims_handlers(socketio, app, coordinator=None, config=None):
         emit('stale_reclaimed', result)
         socketio.emit('claims_update', _get_claims_data_sync())
 
+    @socketio.on('get_repo_from_project')
+    def handle_get_repo_from_project(data):
+        """Get GitHub repository from a project's git remote."""
+        from flask_socketio import emit
+        project_path = data.get('project_path', '')
+
+        if not project_path or not os.path.isdir(project_path):
+            emit('project_repo', {'success': False, 'error': 'Invalid project path'})
+            return
+
+        repo = _get_repo_from_git_remote(project_path)
+        if repo:
+            emit('project_repo', {'success': True, 'repo': repo})
+        else:
+            emit('project_repo', {'success': False, 'error': 'Could not detect GitHub repo from git remote'})
+
     logger.info("Multi-user socket handlers registered")
 
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
+
+def _get_repo_from_git_remote(project_path: str) -> Optional[str]:
+    """Extract owner/repo from a project's git remote URL."""
+    import subprocess
+    import re
+
+    try:
+        # Get the origin remote URL
+        result = subprocess.run(
+            ['git', 'remote', 'get-url', 'origin'],
+            cwd=project_path,
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+
+        if result.returncode != 0:
+            return None
+
+        remote_url = result.stdout.strip()
+
+        # Parse GitHub URL formats:
+        # https://github.com/owner/repo.git
+        # https://github.com/owner/repo
+        # git@github.com:owner/repo.git
+        # git@github.com:owner/repo
+
+        # HTTPS format
+        https_match = re.search(r'github\.com[/:]([^/]+)/([^/\s]+?)(?:\.git)?$', remote_url)
+        if https_match:
+            owner, repo = https_match.groups()
+            return f"{owner}/{repo}"
+
+        # SSH format
+        ssh_match = re.search(r'git@github\.com:([^/]+)/([^/\s]+?)(?:\.git)?$', remote_url)
+        if ssh_match:
+            owner, repo = ssh_match.groups()
+            return f"{owner}/{repo}"
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Error getting git remote: {e}")
+        return None
+
 
 def _load_config_from_env():
     """Load configuration from environment variables."""
@@ -257,7 +328,7 @@ def _test_github_connection_sync() -> Dict:
         loop.close()
 
 
-def _sync_todos_sync() -> Dict:
+def _sync_todos_sync(project_path: str) -> Dict:
     """Sync TODOs synchronously."""
     try:
         from task_coordinator import TaskCoordinator
@@ -267,6 +338,7 @@ def _sync_todos_sync() -> Dict:
                 repo_owner=_setup_state['repo_owner'],
                 repo_name=_setup_state['repo_name'],
                 github_token=_setup_state['github_token'],
+                project_path=project_path,  # Pass project path for TODO.md location
                 claim_timeout=_setup_state['claim_timeout']
             )
             await coordinator.setup()
