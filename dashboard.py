@@ -504,7 +504,8 @@ HTML_TEMPLATE = """
             background: #0d1117;
             border: 1px solid #30363d;
             border-radius: 12px;
-            height: 500px;
+            height: 600px;
+            min-height: 400px;
             overflow: hidden;
             display: flex;
             flex-direction: column;
@@ -518,12 +519,27 @@ HTML_TEMPLATE = """
         .log-content {
             flex: 1;
             overflow-y: auto;
+            overflow-x: hidden;
             padding: 15px;
             font-family: 'Monaco', 'Menlo', monospace;
             font-size: 12px;
             line-height: 1.6;
+            scroll-behavior: smooth;
         }
-        .log-line { margin-bottom: 4px; }
+        .log-line {
+            margin-bottom: 4px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            white-space: pre-wrap;
+            max-width: 100%;
+        }
+        .log-line.new-line {
+            animation: highlight-new 1s ease-out;
+        }
+        @keyframes highlight-new {
+            from { background: rgba(88, 166, 255, 0.2); }
+            to { background: transparent; }
+        }
         .log-line-tool { color: #d29922; }
         .log-line-stage { color: #238636; font-weight: 600; }
         .log-line-error { color: #f85149; }
@@ -965,6 +981,222 @@ HTML_TEMPLATE = """
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
+        /* Usage Stats Bar */
+        .usage-bar {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            padding: 12px 20px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+        .usage-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .usage-label {
+            font-size: 12px;
+            color: #8b949e;
+            text-transform: uppercase;
+        }
+        .usage-value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #58a6ff;
+        }
+        .usage-progress {
+            flex: 1;
+            height: 8px;
+            background: #21262d;
+            border-radius: 4px;
+            overflow: hidden;
+            min-width: 200px;
+        }
+        .usage-progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #238636, #58a6ff);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        .usage-progress-fill.warning { background: linear-gradient(90deg, #d29922, #f85149); }
+        .usage-progress-fill.danger { background: #f85149; }
+        /* Rate Limit Warning */
+        .rate-limit-warning {
+            display: none;
+            padding: 15px 20px;
+            background: linear-gradient(135deg, #da363320, #d2992220);
+            border: 1px solid #da3633;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            animation: pulse-warning 2s infinite;
+        }
+        .rate-limit-warning.active { display: flex; }
+        .rate-limit-warning .warning-icon { font-size: 24px; margin-right: 15px; }
+        .rate-limit-warning .warning-content { flex: 1; }
+        .rate-limit-warning .warning-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #f85149;
+            margin-bottom: 4px;
+        }
+        .rate-limit-warning .warning-countdown {
+            font-size: 24px;
+            font-weight: 700;
+            color: #d29922;
+        }
+        .rate-limit-warning .warning-text { font-size: 13px; color: #8b949e; }
+        @keyframes pulse-warning {
+            0%, 100% { border-color: #da3633; }
+            50% { border-color: #d29922; }
+        }
+        /* Message Queue Form */
+        .message-queue-section {
+            margin-bottom: 20px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 15px;
+        }
+        .message-queue-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .message-queue-header h3 {
+            font-size: 14px;
+            color: #8b949e;
+            text-transform: uppercase;
+        }
+        .message-input-area {
+            display: flex;
+            gap: 10px;
+        }
+        .message-input-area textarea {
+            flex: 1;
+            min-height: 60px;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #30363d;
+            background: #21262d;
+            color: #c9d1d9;
+            font-size: 14px;
+            font-family: inherit;
+            resize: vertical;
+        }
+        .queue-list {
+            margin-top: 15px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .queue-item {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            background: #21262d;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            gap: 10px;
+        }
+        .queue-item .queue-status {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #8b949e;
+        }
+        .queue-item .queue-status.pending { background: #d29922; }
+        .queue-item .queue-status.processing { background: #238636; animation: pulse-dot 1s infinite; }
+        .queue-item .queue-text { flex: 1; font-size: 13px; color: #c9d1d9; }
+        .queue-item .queue-remove { color: #8b949e; cursor: pointer; }
+        .queue-item .queue-remove:hover { color: #f85149; }
+        /* Summary/Master View */
+        .summary-section {
+            margin-bottom: 20px;
+        }
+        .summary-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .summary-header h3 {
+            font-size: 14px;
+            color: #8b949e;
+            text-transform: uppercase;
+        }
+        .summary-tabs {
+            display: flex;
+            gap: 5px;
+        }
+        .summary-tab {
+            padding: 6px 12px;
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            color: #8b949e;
+        }
+        .summary-tab.active {
+            background: #1f6feb20;
+            border-color: #58a6ff;
+            color: #58a6ff;
+        }
+        .summary-content {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .summary-event {
+            display: flex;
+            gap: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid #21262d;
+        }
+        .summary-event:last-child { border-bottom: none; }
+        .summary-event .event-time {
+            font-size: 11px;
+            color: #8b949e;
+            min-width: 60px;
+        }
+        .summary-event .event-type {
+            font-size: 11px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: #21262d;
+            color: #58a6ff;
+            min-width: 60px;
+            text-align: center;
+        }
+        .summary-event .event-message { flex: 1; font-size: 13px; color: #c9d1d9; }
+        .summary-stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        .summary-stat {
+            background: #21262d;
+            border-radius: 6px;
+            padding: 10px;
+            text-align: center;
+        }
+        .summary-stat .stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #58a6ff;
+        }
+        .summary-stat .stat-label {
+            font-size: 10px;
+            color: #8b949e;
+            text-transform: uppercase;
+        }
     </style>
 </head>
 <body>
@@ -1017,6 +1249,80 @@ HTML_TEMPLATE = """
 
         <div class="guidance-section">
             <textarea id="initialGuidance" placeholder="Optional: Initial guidance for the orchestra (e.g., 'Focus on backend API tasks first' or 'Start with the authentication module')" onchange="savePendingProjectConfig()"></textarea>
+        </div>
+
+        <!-- Usage Stats Bar -->
+        <div class="usage-bar" id="usageBar">
+            <div class="usage-item">
+                <span class="usage-label">Today</span>
+                <span class="usage-value" id="usageToday">0/20</span>
+            </div>
+            <div class="usage-item">
+                <span class="usage-label">This Week</span>
+                <span class="usage-value" id="usageWeek">0/100</span>
+            </div>
+            <div class="usage-progress">
+                <div class="usage-progress-fill" id="usageProgressFill" style="width: 0%"></div>
+            </div>
+            <div class="usage-item">
+                <span class="usage-label">Tokens Est.</span>
+                <span class="usage-value" id="usageTokens">0</span>
+            </div>
+        </div>
+
+        <!-- Rate Limit Warning -->
+        <div class="rate-limit-warning" id="rateLimitWarning">
+            <span class="warning-icon">⚠️</span>
+            <div class="warning-content">
+                <div class="warning-title">Rate Limit Reached</div>
+                <div class="warning-text">Will auto-resume in: <span class="warning-countdown" id="rateLimitCountdown">--:--</span></div>
+            </div>
+            <button class="btn-small" onclick="clearRateLimit()">Clear & Resume</button>
+        </div>
+
+        <!-- Message Queue (for queuing messages to send) -->
+        <div class="message-queue-section">
+            <div class="message-queue-header">
+                <h3>Message Queue <span class="queue-count" id="messageQueueCount">0</span></h3>
+            </div>
+            <div class="message-input-area">
+                <textarea id="queueMessageInput" placeholder="Type a message to queue up for the next available slot..."></textarea>
+                <button class="primary" onclick="addToMessageQueue()">Queue</button>
+            </div>
+            <div class="queue-list" id="messageQueueList"></div>
+        </div>
+
+        <!-- Summary/Master View -->
+        <div class="summary-section">
+            <div class="summary-header">
+                <h3>Activity Summary</h3>
+                <div class="summary-tabs">
+                    <span class="summary-tab active" onclick="switchSummaryTab('events')">Events</span>
+                    <span class="summary-tab" onclick="switchSummaryTab('hourly')">Hourly</span>
+                    <span class="summary-tab" onclick="switchSummaryTab('daily')">Daily</span>
+                </div>
+            </div>
+            <div class="summary-stats" id="summaryStats">
+                <div class="summary-stat">
+                    <div class="stat-value" id="summaryRequests">0</div>
+                    <div class="stat-label">Requests</div>
+                </div>
+                <div class="summary-stat">
+                    <div class="stat-value" id="summaryTokens">0</div>
+                    <div class="stat-label">Tokens</div>
+                </div>
+                <div class="summary-stat">
+                    <div class="stat-value" id="summaryProjects">0</div>
+                    <div class="stat-label">Projects</div>
+                </div>
+                <div class="summary-stat">
+                    <div class="stat-value" id="summaryAlerts">0</div>
+                    <div class="stat-label">Alerts</div>
+                </div>
+            </div>
+            <div class="summary-content" id="summaryContent">
+                <div style="color: #8b949e; text-align: center; padding: 20px;">No events yet</div>
+            </div>
         </div>
 
         <div class="task-queue-section">
@@ -1674,7 +1980,7 @@ HTML_TEMPLATE = """
         function addLogLine(line) {
             var logContent = document.getElementById('logContent');
             var div = document.createElement('div');
-            div.className = 'log-line';
+            div.className = 'log-line new-line';
 
             // Determine line type and set appropriate class
             if (line.indexOf('[TOOL]') !== -1) {
@@ -1689,7 +1995,21 @@ HTML_TEMPLATE = """
 
             div.textContent = line;
             logContent.appendChild(div);
-            logContent.scrollTop = logContent.scrollHeight;
+
+            // Force scroll to bottom with a small delay for rendering
+            requestAnimationFrame(function() {
+                logContent.scrollTop = logContent.scrollHeight;
+            });
+
+            // Remove highlight class after animation
+            setTimeout(function() {
+                div.classList.remove('new-line');
+            }, 1000);
+
+            // Limit visible log lines to prevent browser slowdown (keep last 1000)
+            while (logContent.children.length > 1000) {
+                logContent.removeChild(logContent.firstChild);
+            }
         }
 
         function addPR(pr, append) {
@@ -1929,6 +2249,291 @@ HTML_TEMPLATE = """
             closeBrowser();
             loadTodos();
         }
+
+        // ============================================
+        // Usage Stats & Rate Limit Handling
+        // ============================================
+        var rateLimitInterval = null;
+        var currentSummaryTab = 'events';
+        var DAILY_LIMIT = 20;
+        var WEEKLY_LIMIT = 100;
+
+        // Request usage stats on page load
+        setTimeout(function() {
+            socket.emit('get_usage');
+            socket.emit('get_queue');
+            socket.emit('get_summary');
+        }, 500);
+
+        socket.on('usage_update', function(data) {
+            updateUsageUI(data);
+        });
+
+        function updateUsageUI(data) {
+            var today = data.requests_today || 0;
+            var week = data.requests_this_week || 0;
+            var tokens = data.tokens_estimated || 0;
+
+            document.getElementById('usageToday').textContent = today + '/' + DAILY_LIMIT;
+            document.getElementById('usageWeek').textContent = week + '/' + WEEKLY_LIMIT;
+            document.getElementById('usageTokens').textContent = formatNumber(tokens);
+
+            // Update progress bar
+            var percentage = Math.min((today / DAILY_LIMIT) * 100, 100);
+            var progressFill = document.getElementById('usageProgressFill');
+            progressFill.style.width = percentage + '%';
+            progressFill.className = 'usage-progress-fill';
+            if (percentage >= 90) {
+                progressFill.classList.add('danger');
+            } else if (percentage >= 70) {
+                progressFill.classList.add('warning');
+            }
+
+            // Handle rate limit
+            if (data.rate_limited && data.rate_limit_until) {
+                showRateLimitWarning(data.rate_limit_until);
+            } else {
+                hideRateLimitWarning();
+            }
+        }
+
+        function showRateLimitWarning(untilTime) {
+            var warning = document.getElementById('rateLimitWarning');
+            warning.classList.add('active');
+
+            if (rateLimitInterval) clearInterval(rateLimitInterval);
+            rateLimitInterval = setInterval(function() {
+                var now = Date.now();
+                var until = new Date(untilTime).getTime();
+                var remaining = Math.max(0, until - now);
+
+                if (remaining <= 0) {
+                    hideRateLimitWarning();
+                    socket.emit('clear_rate_limit');
+                    return;
+                }
+
+                var mins = Math.floor(remaining / 60000);
+                var secs = Math.floor((remaining % 60000) / 1000);
+                document.getElementById('rateLimitCountdown').textContent =
+                    String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+            }, 1000);
+        }
+
+        function hideRateLimitWarning() {
+            document.getElementById('rateLimitWarning').classList.remove('active');
+            if (rateLimitInterval) {
+                clearInterval(rateLimitInterval);
+                rateLimitInterval = null;
+            }
+        }
+
+        function clearRateLimit() {
+            socket.emit('clear_rate_limit');
+        }
+
+        // ============================================
+        // Message Queue Handling
+        // ============================================
+        socket.on('queue_update', function(data) {
+            updateMessageQueueUI(data);
+        });
+
+        function updateMessageQueueUI(data) {
+            var queue = data.queue || [];
+            document.getElementById('messageQueueCount').textContent = queue.length;
+
+            var queueList = document.getElementById('messageQueueList');
+            // Clear using DOM methods
+            while (queueList.firstChild) {
+                queueList.removeChild(queueList.firstChild);
+            }
+
+            if (queue.length === 0) {
+                var emptyMsg = document.createElement('div');
+                emptyMsg.style.cssText = 'color: #8b949e; text-align: center; padding: 10px; font-size: 12px;';
+                emptyMsg.textContent = 'No messages queued';
+                queueList.appendChild(emptyMsg);
+                return;
+            }
+
+            queue.forEach(function(item) {
+                var div = document.createElement('div');
+                div.className = 'queue-item';
+
+                var statusSpan = document.createElement('span');
+                statusSpan.className = 'queue-status ' + item.status;
+
+                var textSpan = document.createElement('span');
+                textSpan.className = 'queue-text';
+                textSpan.textContent = item.message.substring(0, 100) + (item.message.length > 100 ? '...' : '');
+
+                var removeSpan = document.createElement('span');
+                removeSpan.className = 'queue-remove';
+                removeSpan.textContent = '×';
+                removeSpan.onclick = function() { removeFromQueue(item.id); };
+
+                div.appendChild(statusSpan);
+                div.appendChild(textSpan);
+                div.appendChild(removeSpan);
+                queueList.appendChild(div);
+            });
+        }
+
+        function addToMessageQueue() {
+            var input = document.getElementById('queueMessageInput');
+            var message = input.value.trim();
+            if (!message) {
+                alert('Please enter a message to queue');
+                return;
+            }
+
+            socket.emit('add_to_queue', {
+                message: message,
+                project_id: currentProjectId && !currentProjectId.startsWith('pending_') ? currentProjectId : null
+            });
+            input.value = '';
+        }
+
+        function removeFromQueue(id) {
+            socket.emit('remove_from_queue', { id: id });
+        }
+
+        // ============================================
+        // Summary/Master View Handling
+        // ============================================
+        socket.on('summary_update', function(data) {
+            updateSummaryUI(data);
+        });
+
+        function updateSummaryUI(data) {
+            document.getElementById('summaryRequests').textContent = data.total_requests || 0;
+            document.getElementById('summaryTokens').textContent = formatNumber(data.total_tokens || 0);
+            document.getElementById('summaryProjects').textContent = Object.keys(projectsData).length;
+            document.getElementById('summaryAlerts').textContent = data.alerts || 0;
+            renderSummaryContent(data);
+        }
+
+        function switchSummaryTab(tab) {
+            currentSummaryTab = tab;
+            document.querySelectorAll('.summary-tab').forEach(function(el) {
+                el.classList.remove('active');
+                if (el.textContent.toLowerCase() === tab) {
+                    el.classList.add('active');
+                }
+            });
+            socket.emit('get_summary');
+        }
+
+        function renderSummaryContent(data) {
+            var content = document.getElementById('summaryContent');
+            // Clear content safely
+            while (content.firstChild) {
+                content.removeChild(content.firstChild);
+            }
+
+            if (currentSummaryTab === 'events') {
+                var events = data.events || [];
+                if (events.length === 0) {
+                    var empty = document.createElement('div');
+                    empty.style.cssText = 'color: #8b949e; text-align: center; padding: 20px;';
+                    empty.textContent = 'No events yet';
+                    content.appendChild(empty);
+                    return;
+                }
+                events.slice(0, 50).forEach(function(event) {
+                    var div = document.createElement('div');
+                    div.className = 'summary-event';
+
+                    var timeSpan = document.createElement('span');
+                    timeSpan.className = 'event-time';
+                    timeSpan.textContent = new Date(event.timestamp).toLocaleTimeString();
+
+                    var typeSpan = document.createElement('span');
+                    typeSpan.className = 'event-type';
+                    typeSpan.textContent = event.type || 'info';
+
+                    var msgSpan = document.createElement('span');
+                    msgSpan.className = 'event-message';
+                    msgSpan.textContent = event.message || '';
+
+                    div.appendChild(timeSpan);
+                    div.appendChild(typeSpan);
+                    div.appendChild(msgSpan);
+                    content.appendChild(div);
+                });
+            } else if (currentSummaryTab === 'hourly') {
+                var hourly = data.hourly || {};
+                var hours = Object.keys(hourly).sort().reverse();
+                if (hours.length === 0) {
+                    var empty = document.createElement('div');
+                    empty.style.cssText = 'color: #8b949e; text-align: center; padding: 20px;';
+                    empty.textContent = 'No hourly data yet';
+                    content.appendChild(empty);
+                    return;
+                }
+                hours.slice(0, 24).forEach(function(hour) {
+                    var stats = hourly[hour];
+                    var div = document.createElement('div');
+                    div.className = 'summary-event';
+
+                    var timeSpan = document.createElement('span');
+                    timeSpan.className = 'event-time';
+                    timeSpan.textContent = hour + ':00';
+
+                    var typeSpan = document.createElement('span');
+                    typeSpan.className = 'event-type';
+                    typeSpan.textContent = 'requests';
+
+                    var msgSpan = document.createElement('span');
+                    msgSpan.className = 'event-message';
+                    msgSpan.textContent = stats.requests + ' requests, ' + formatNumber(stats.tokens) + ' tokens';
+
+                    div.appendChild(timeSpan);
+                    div.appendChild(typeSpan);
+                    div.appendChild(msgSpan);
+                    content.appendChild(div);
+                });
+            } else if (currentSummaryTab === 'daily') {
+                var daily = data.daily || {};
+                var days = Object.keys(daily).sort().reverse();
+                if (days.length === 0) {
+                    var empty = document.createElement('div');
+                    empty.style.cssText = 'color: #8b949e; text-align: center; padding: 20px;';
+                    empty.textContent = 'No daily data yet';
+                    content.appendChild(empty);
+                    return;
+                }
+                days.slice(0, 7).forEach(function(day) {
+                    var stats = daily[day];
+                    var div = document.createElement('div');
+                    div.className = 'summary-event';
+
+                    var timeSpan = document.createElement('span');
+                    timeSpan.className = 'event-time';
+                    timeSpan.textContent = day;
+
+                    var typeSpan = document.createElement('span');
+                    typeSpan.className = 'event-type';
+                    typeSpan.textContent = 'daily';
+
+                    var msgSpan = document.createElement('span');
+                    msgSpan.className = 'event-message';
+                    msgSpan.textContent = stats.requests + ' requests, ' + formatNumber(stats.tokens) + ' tokens';
+
+                    div.appendChild(timeSpan);
+                    div.appendChild(typeSpan);
+                    div.appendChild(msgSpan);
+                    content.appendChild(div);
+                });
+            }
+        }
+
+        // Request updates periodically
+        setInterval(function() {
+            socket.emit('get_usage');
+            socket.emit('get_summary');
+        }, 30000);
     </script>
 
     <!-- Directory Browser Modal -->
