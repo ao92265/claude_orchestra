@@ -3372,11 +3372,11 @@ def handle_start(data):
         if multiuser_config and multiuser_config.get('enabled'):
             # Use multi-user orchestra - claims tasks from GitHub Issues
             orchestra_script = os.path.join(script_dir, 'orchestra_multi_user.py')
-            logger.info(f"Using multi-user orchestra with repo: {multiuser_config['repo']}")
+            print(f"[Multi-User] Using multi-user orchestra with repo: {multiuser_config['repo']}")
         else:
             # Use standard orchestra - reads from TODO.md
             orchestra_script = os.path.join(script_dir, 'claude_orchestra.py')
-            logger.info("Using standard orchestra (no multi-user)")
+            print("[Orchestra] Using standard orchestra (no multi-user)")
 
         cmd = [
             'python3', '-u',  # Unbuffered output for real-time streaming
