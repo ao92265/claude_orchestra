@@ -251,6 +251,141 @@ crontab -e
 0 0 * * * cd /path/to/project && python claude_orchestra_daemon.py --project . --daemon --max-hours 23 >> /var/log/claude_orchestra.log 2>&1
 ```
 
+## Multi-User Mode 👥
+
+Enable multiple users to run Claude Orchestra on the same repository without conflicts. Uses GitHub Issues as a distributed task queue for coordination.
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  User A (MacBook)         User B (Linux)         User C (Win)  │
+│  ┌───────────────┐       ┌───────────────┐      ┌────────────┐ │
+│  │ Orchestra     │       │ Orchestra     │      │ Orchestra  │ │
+│  │ Agent A       │       │ Agent B       │      │ Agent C    │ │
+│  └───────┬───────┘       └───────┬───────┘      └─────┬──────┘ │
+│          └───────────────────────┼────────────────────┘        │
+│                                  ▼                              │
+│                    ┌─────────────────────────┐                 │
+│                    │   GitHub Issues         │                 │
+│                    │   (Task Queue)          │                 │
+│                    │                         │                 │
+│                    │ #42 [claimed by A]      │                 │
+│                    │ #43 [claimed by B]      │                 │
+│                    │ #44 [available]         │                 │
+│                    └─────────────────────────┘                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+- **Atomic claiming** via GitHub assignee field
+- **Heartbeat system** keeps claims alive (5 min intervals)
+- **Stale detection** auto-releases abandoned claims (30 min timeout)
+- **Branch naming** `{user}/task/{issue#}` for clear ownership
+
+### Setup (Required for each user)
+
+```bash
+# 1. Pull the multi-user branch
+git fetch origin
+git checkout feature/multi-user-isolation
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Set environment variables
+export GITHUB_TOKEN=ghp_your_personal_token
+export GITHUB_REPO=owner/repo
+export ORCHESTRA_MULTI_USER=true
+
+# Optional: Customize timeouts
+export ORCHESTRA_CLAIM_TIMEOUT=1800    # 30 min default
+export ORCHESTRA_HEARTBEAT_INTERVAL=300 # 5 min default
+```
+
+### Getting a GitHub Token
+
+1. Go to https://github.com/settings/tokens
+2. Click "Generate new token (classic)"
+3. Select scopes: `repo` (full control)
+4. Copy the token and set as `GITHUB_TOKEN`
+
+### Initial Sync (Run once per repository)
+
+Before the first run, sync your TODO.md to GitHub Issues:
+
+```bash
+python task_coordinator.py sync --repo owner/repo
+```
+
+This creates GitHub Issues for each task in TODO.md with labels:
+- `orchestra-task` - Identifies managed tasks
+- `status:available` - Task can be claimed
+- `priority:high/medium/low` - Priority level
+
+### Running with Multi-User Mode
+
+```bash
+# Run a single cycle (claims task, implements, creates PR)
+python orchestra_multi_user.py --project /path/to/project --cycle
+
+# Run continuous until no tasks remain
+python orchestra_multi_user.py --project /path/to/project \
+    --continuous --max-cycles 20
+
+# Prefer specific task types
+python orchestra_multi_user.py --project /path/to/project \
+    --cycle --prefer-priority high --prefer-size small
+```
+
+### Monitoring Claims
+
+```bash
+# List all active claims
+python task_coordinator.py list --repo owner/repo
+
+# Check for stale claims
+python task_coordinator.py stale --repo owner/repo
+
+# Release stale claims (auto-releases after timeout anyway)
+python task_coordinator.py reclaim --repo owner/repo
+```
+
+### CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `sync` | Sync TODO.md to GitHub Issues |
+| `list` | Show available tasks |
+| `claim --issue N` | Claim specific issue |
+| `release --issue N` | Release a claim |
+| `stale` | List stale claims |
+| `reclaim` | Release all stale claims |
+
+### Configuration Options
+
+| Env Variable | Default | Description |
+|-------------|---------|-------------|
+| `ORCHESTRA_MULTI_USER` | false | Enable multi-user mode |
+| `GITHUB_TOKEN` | - | GitHub personal access token |
+| `GITHUB_REPO` | - | Repository (owner/repo format) |
+| `ORCHESTRA_CLAIM_TIMEOUT` | 1800 | Seconds before claim is stale |
+| `ORCHESTRA_HEARTBEAT_INTERVAL` | 300 | Seconds between heartbeats |
+
+### Troubleshooting
+
+**"No tasks available"**
+- Check GitHub Issues for `status:available` label
+- Run `python task_coordinator.py sync` to sync TODO.md
+- Another agent may have claimed all tasks
+
+**"Already assigned"**
+- Task was claimed by another agent
+- The coordinator will automatically try the next task
+
+**Stale claims not releasing**
+- Verify timeout is set correctly
+- Run `python task_coordinator.py reclaim` manually
+
 ## Safety Considerations
 
 ⚠️ **This runs Claude with `--dangerously-skip-permissions`**
