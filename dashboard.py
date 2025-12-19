@@ -539,6 +539,21 @@ HTML_TEMPLATE = """
         .project-tab.running .tab-status {
             color: #238636;
         }
+        .project-tab.pending {
+            border-color: #d29922;
+            background: #d2992220;
+        }
+        .project-tab.pending .tab-status {
+            color: #d29922;
+        }
+        .project-tab.add-btn {
+            border-style: dashed;
+            background: transparent;
+        }
+        .project-tab.add-btn:hover {
+            border-color: #58a6ff;
+            background: #21262d;
+        }
         .tab-icon {
             font-size: 16px;
         }
@@ -614,12 +629,12 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="controls">
-            <input type="text" id="projectPath" placeholder="Project path (e.g., /Users/you/project)" value="">
+            <input type="text" id="projectPath" placeholder="Project path (e.g., /Users/you/project)" value="" onchange="savePendingProjectConfig()">
             <button class="browse-btn" onclick="openBrowser()" title="Browse for folder">📁</button>
             <select id="recentProjects" onchange="selectRecentProject()" title="Recent projects">
                 <option value="">Recent...</option>
             </select>
-            <select id="maxHours">
+            <select id="maxHours" onchange="savePendingProjectConfig()">
                 <option value="0">Indefinite</option>
                 <option value="0.5">30 minutes</option>
                 <option value="1" selected>1 hour</option>
@@ -628,12 +643,12 @@ HTML_TEMPLATE = """
                 <option value="8">8 hours</option>
                 <option value="24">24 hours</option>
             </select>
-            <select id="taskMode">
+            <select id="taskMode" onchange="savePendingProjectConfig()">
                 <option value="small">Small Tasks</option>
                 <option value="normal" selected>Normal</option>
                 <option value="large">Large Features</option>
             </select>
-            <select id="modelSelect">
+            <select id="modelSelect" onchange="savePendingProjectConfig()">
                 <option value="haiku">Haiku (Fast)</option>
                 <option value="sonnet" selected>Sonnet (Balanced)</option>
                 <option value="opus">Opus (Most Capable)</option>
@@ -647,7 +662,7 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="guidance-section">
-            <textarea id="initialGuidance" placeholder="Optional: Initial guidance for the orchestra (e.g., 'Focus on backend API tasks first' or 'Start with the authentication module')"></textarea>
+            <textarea id="initialGuidance" placeholder="Optional: Initial guidance for the orchestra (e.g., 'Focus on backend API tasks first' or 'Start with the authentication module')" onchange="savePendingProjectConfig()"></textarea>
         </div>
 
         <div class="task-queue-section">
@@ -774,11 +789,19 @@ HTML_TEMPLATE = """
         let currentProjectId = 'new';
         let projectsData = {};
 
+        // Pending projects (configured but not started yet)
+        let pendingProjects = {};  // { pending_1: { path: '...', prompt: '...' }, ... }
+        let pendingCounter = 0;
+
         socket.on('connect', function() {
             console.log('Connected to server');
             socket.emit('get_state');
             socket.emit('get_all_projects');
             loadRecentProjects();
+            // Create initial pending project if none exist
+            if (Object.keys(pendingProjects).length === 0 && Object.keys(projectsData).length === 0) {
+                addNewPendingProject();
+            }
         });
 
         socket.on('projects_update', function(data) {
@@ -786,11 +809,21 @@ HTML_TEMPLATE = """
             (data.projects || []).forEach(function(p) {
                 projectsData[p.id] = p;
             });
+            // If we have running projects but current is a pending, stay on pending
+            // If current is 'new', switch to first running project or create pending
+            if (currentProjectId === 'new') {
+                if (Object.keys(projectsData).length > 0) {
+                    currentProjectId = Object.keys(projectsData)[0];
+                } else if (Object.keys(pendingProjects).length === 0) {
+                    addNewPendingProject();
+                    return;  // addNewPendingProject calls updateProjectTabs
+                }
+            }
             updateProjectTabs();
         });
 
         function updateProjectTabs() {
-            console.log('updateProjectTabs called, projectsData:', projectsData);
+            console.log('updateProjectTabs called, projectsData:', projectsData, 'pendingProjects:', pendingProjects);
             var tabs = document.getElementById('projectTabs');
             if (!tabs) {
                 console.error('projectTabs element not found!');
@@ -798,7 +831,7 @@ HTML_TEMPLATE = """
             }
             tabs.innerHTML = '';
 
-            // Add tabs for each project
+            // Add tabs for running/stopped projects
             Object.keys(projectsData).forEach(function(id) {
                 var project = projectsData[id];
                 var tab = document.createElement('div');
@@ -816,14 +849,116 @@ HTML_TEMPLATE = """
                 tabs.appendChild(tab);
             });
 
-            // Add "Add Project" tab at the end
+            // Add tabs for pending (not yet started) projects
+            Object.keys(pendingProjects).forEach(function(id) {
+                var pending = pendingProjects[id];
+                var tab = document.createElement('div');
+                tab.className = 'project-tab pending' + (id === currentProjectId ? ' active' : '');
+                tab.setAttribute('data-project', id);
+                tab.onclick = function() { selectProject(id); };
+
+                // Show folder name if path set, otherwise "New Project"
+                var name = pending.path ? pending.path.split('/').pop() || 'New Project' : 'New Project';
+                var icon = '⚙️';
+                var status = 'Setup';
+
+                tab.innerHTML = '<span class="tab-icon">' + icon + '</span>' +
+                               '<span class="tab-name">' + name + '</span>' +
+                               '<span class="tab-status">' + status + '</span>' +
+                               '<span class="tab-close" onclick="event.stopPropagation(); removePendingProject(\\'' + id + '\\')">&times;</span>';
+                tabs.appendChild(tab);
+            });
+
+            // Add "Add Project" button at the end
             var addTab = document.createElement('div');
-            addTab.className = 'project-tab' + (currentProjectId === 'new' ? ' active' : '');
-            addTab.setAttribute('data-project', 'new');
-            addTab.onclick = function() { console.log('Add tab clicked'); selectProject('new'); };
+            addTab.className = 'project-tab add-btn';
+            addTab.setAttribute('data-project', 'add');
+            addTab.onclick = function() { console.log('Add tab clicked'); addNewPendingProject(); };
             addTab.innerHTML = '<span class="tab-icon">➕</span><span class="tab-name">Add Project</span>';
             tabs.appendChild(addTab);
             console.log('Tabs updated, children count:', tabs.children.length);
+        }
+
+        function addNewPendingProject() {
+            pendingCounter++;
+            var newId = 'pending_' + pendingCounter;
+            pendingProjects[newId] = { path: '', prompt: '', maxHours: '', maxCycles: '', model: 'sonnet' };
+            currentProjectId = newId;
+            updateProjectTabs();
+            // Show setup view for this pending project
+            showPendingProjectSetup(newId);
+        }
+
+        function removePendingProject(pendingId) {
+            delete pendingProjects[pendingId];
+            if (currentProjectId === pendingId) {
+                // Switch to another tab
+                var keys = Object.keys(projectsData).concat(Object.keys(pendingProjects));
+                if (keys.length > 0) {
+                    selectProject(keys[0]);
+                } else {
+                    addNewPendingProject();
+                }
+            } else {
+                updateProjectTabs();
+            }
+        }
+
+        function showPendingProjectSetup(pendingId) {
+            var pending = pendingProjects[pendingId];
+            if (!pending) return;
+
+            // Populate form with pending project data
+            document.getElementById('projectPath').value = pending.path || '';
+            document.getElementById('initialGuidance').value = pending.guidance || '';
+            document.getElementById('maxHours').value = pending.maxHours || '1';
+            document.getElementById('taskMode').value = pending.taskMode || 'normal';
+            if (document.getElementById('modelSelect')) {
+                document.getElementById('modelSelect').value = pending.model || 'sonnet';
+            }
+
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            document.getElementById('statusBadge').textContent = 'Setup';
+            document.getElementById('statusBadge').className = 'status-badge status-stopped';
+
+            // Clear the activity panels
+            document.getElementById('logContent').innerHTML = '<div class="log-line log-line-stage">Select a project folder and click "Start Orchestra" to begin</div>';
+            document.getElementById('activityLog').innerHTML = '<li class="pr-item" style="color: #8b949e;">No activity yet</li>';
+            document.getElementById('subagentsList').innerHTML = '<li class="pr-item" style="color: #8b949e;">None yet</li>';
+            document.getElementById('prList').innerHTML = '<li class="pr-item" style="color: #8b949e;">No PRs yet</li>';
+
+            // Reset stats
+            document.getElementById('currentCycle').textContent = '0';
+            document.getElementById('cyclesCompleted').textContent = '0';
+            document.getElementById('prsCreated').textContent = '0';
+            document.getElementById('timeElapsed').textContent = '00:00';
+            document.getElementById('branchesCreated').textContent = '0';
+            document.getElementById('filesChanged').textContent = '0';
+            document.getElementById('subAgentCount').textContent = '0';
+            document.getElementById('toolsUsed').textContent = '0';
+
+            // Open browser for new empty projects
+            if (!pending.path) {
+                openBrowser();
+            }
+        }
+
+        // Save pending project config when form fields change
+        function savePendingProjectConfig() {
+            if (!currentProjectId || !currentProjectId.startsWith('pending_')) return;
+            if (!pendingProjects[currentProjectId]) return;
+
+            pendingProjects[currentProjectId].path = document.getElementById('projectPath').value;
+            pendingProjects[currentProjectId].guidance = document.getElementById('initialGuidance').value;
+            pendingProjects[currentProjectId].maxHours = document.getElementById('maxHours').value;
+            pendingProjects[currentProjectId].taskMode = document.getElementById('taskMode').value;
+            var modelSelect = document.getElementById('modelSelect');
+            if (modelSelect) {
+                pendingProjects[currentProjectId].model = modelSelect.value;
+            }
+            // Update tab name if path changed
+            updateProjectTabs();
         }
 
         function selectProject(projectId) {
@@ -832,32 +967,13 @@ HTML_TEMPLATE = """
             updateProjectTabs();
 
             if (projectId === 'new') {
-                // Reset form for new project
-                console.log('Resetting form for new project');
-                document.getElementById('projectPath').value = '';
-                document.getElementById('startBtn').disabled = false;
-                document.getElementById('stopBtn').disabled = true;
-                document.getElementById('statusBadge').textContent = 'New Project';
-                document.getElementById('statusBadge').className = 'status-badge status-stopped';
-                // Clear the activity panels
-                document.getElementById('logContent').innerHTML = '<div class="log-line log-line-stage">Select a project folder and click "Start Orchestra" to begin</div>';
-                document.getElementById('activityLog').innerHTML = '<li class="pr-item" style="color: #8b949e;">No activity yet</li>';
-                document.getElementById('subagentsList').innerHTML = '<li class="pr-item" style="color: #8b949e;">None yet</li>';
-                document.getElementById('prList').innerHTML = '<li class="pr-item" style="color: #8b949e;">No PRs yet</li>';
-                // Reset stats
-                document.getElementById('currentCycle').textContent = '0';
-                document.getElementById('cyclesCompleted').textContent = '0';
-                document.getElementById('prsCreated').textContent = '0';
-                document.getElementById('timeElapsed').textContent = '00:00';
-                document.getElementById('branchesCreated').textContent = '0';
-                document.getElementById('filesChanged').textContent = '0';
-                document.getElementById('subAgentCount').textContent = '0';
-                document.getElementById('toolsUsed').textContent = '0';
-                // Focus the project path input and open browser
-                document.getElementById('projectPath').focus();
-                openBrowser();
+                // Legacy - redirect to creating a new pending project
+                addNewPendingProject();
+            } else if (projectId.startsWith('pending_')) {
+                // Show setup for pending project
+                showPendingProjectSetup(projectId);
             } else {
-                // Load existing project state
+                // Load existing project state from server
                 socket.emit('get_project_state', { project_id: projectId });
             }
         }
@@ -871,7 +987,13 @@ HTML_TEMPLATE = """
             }
             socket.emit('remove_project', { project_id: projectId });
             if (currentProjectId === projectId) {
-                selectProject('new');
+                // Switch to another available tab
+                var keys = Object.keys(projectsData).filter(k => k !== projectId).concat(Object.keys(pendingProjects));
+                if (keys.length > 0) {
+                    selectProject(keys[0]);
+                } else {
+                    addNewPendingProject();
+                }
             }
         }
 
@@ -1345,6 +1467,11 @@ HTML_TEMPLATE = """
             // Generate project ID from path
             var projectId = projectPath.split('/').filter(Boolean).pop() || 'project';
 
+            // Remove from pending projects if this was a pending project
+            if (currentProjectId && currentProjectId.startsWith('pending_')) {
+                delete pendingProjects[currentProjectId];
+            }
+
             socket.emit('start_orchestra', {
                 project_id: projectId,
                 project_path: projectPath,
@@ -1358,13 +1485,12 @@ HTML_TEMPLATE = """
 
             // Switch to this project tab
             currentProjectId = projectId;
+            updateProjectTabs();
         }
 
         function stopOrchestra() {
-            if (currentProjectId && currentProjectId !== 'new') {
+            if (currentProjectId && !currentProjectId.startsWith('pending_')) {
                 socket.emit('stop_project', { project_id: currentProjectId });
-            } else {
-                socket.emit('stop_orchestra');
             }
         }
 
@@ -1441,6 +1567,11 @@ HTML_TEMPLATE = """
         function selectCurrentDir() {
             var path = document.getElementById('currentPath').value;
             document.getElementById('projectPath').value = path;
+            // Save to pending project if applicable
+            if (currentProjectId && currentProjectId.startsWith('pending_') && pendingProjects[currentProjectId]) {
+                pendingProjects[currentProjectId].path = path;
+                updateProjectTabs();  // Update tab name to show folder name
+            }
             closeBrowser();
             loadTodos();
         }
