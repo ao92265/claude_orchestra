@@ -81,7 +81,10 @@ class ClaudeOrchestra:
         timeout: int = 1800,  # 30 minutes default per agent
         model: str = "sonnet",  # or "opus" for more complex tasks
         stream: bool = True,  # Stream output in real-time
-        task_mode: str = "normal"  # "small", "normal", or "large"
+        task_mode: str = "normal",  # "small", "normal", or "large"
+        guidance: str = "",  # Initial guidance for the implementer
+        task_queue: list = None,  # List of tasks to work on first
+        use_subagents: bool = False  # Use specialized sub-agents
     ):
         self.project_path = Path(project_path).resolve()
         self.todo_file = self.project_path / todo_file
@@ -89,12 +92,86 @@ class ClaudeOrchestra:
         self.model = model
         self.stream = stream
         self.task_mode = task_mode
+        self.guidance = guidance
+        self.task_queue = task_queue or []
+        self.current_task_index = 0  # Track which queued task we're on
+        self.use_subagents = use_subagents
 
         # Validate project path
         if not self.project_path.exists():
             raise ValueError(f"Project path does not exist: {self.project_path}")
 
         logger.info(f"Initialized Claude Orchestra for project: {self.project_path}")
+        if self.guidance:
+            logger.info(f"Initial guidance: {self.guidance[:100]}...")
+        if self.task_queue:
+            logger.info(f"Task queue: {len(self.task_queue)} task(s)")
+        if self.use_subagents:
+            logger.info("Sub-agents ENABLED: Will use specialized agents for review, testing, and debugging")
+
+    def _get_subagent_instructions(self, role: str) -> str:
+        """
+        Get sub-agent usage instructions for a specific role.
+
+        These instructions tell Claude to leverage specialized sub-agents
+        available through the Task tool for better results.
+        """
+        if not self.use_subagents:
+            return ""
+
+        instructions = {
+            "implementer": """
+SUB-AGENTS AVAILABLE - Use these for better results:
+- Use the Task tool with subagent_type='Explore' to quickly understand unfamiliar parts of the codebase
+- Use the Task tool with subagent_type='debugger' if you encounter errors or unexpected behavior
+- Use the Task tool with subagent_type='code-reviewer' to self-review your code before committing
+- Use the Task tool with subagent_type='Plan' to design complex implementations before coding
+- For database work, use subagent_type='database-architect' or 'database-optimizer'
+- For API work, use subagent_type='backend-architect' or 'fastapi-pro' / 'django-pro'
+
+PROACTIVELY use sub-agents - they improve code quality significantly!
+""",
+            "tester": """
+SUB-AGENTS AVAILABLE - Use these for better results:
+- Use the Task tool with subagent_type='test-automator' to create comprehensive test suites
+- Use the Task tool with subagent_type='debugger' to investigate and fix test failures
+- Use the Task tool with subagent_type='e2e-testing-patterns' for end-to-end tests
+- Use the Task tool with subagent_type='performance-engineer' for performance testing
+- Use the Task tool with subagent_type='Explore' to understand what code needs testing
+
+PROACTIVELY use sub-agents for thorough test coverage!
+""",
+            "reviewer": """
+SUB-AGENTS AVAILABLE - Use these for thorough review:
+- Use the Task tool with subagent_type='code-reviewer' for detailed code quality analysis
+- Use the Task tool with subagent_type='security-auditor' for security vulnerability assessment
+- Use the Task tool with subagent_type='architect-review' for architectural review
+- Use the Task tool with subagent_type='performance-engineer' for performance review
+- Use the Task tool with subagent_type='Explore' to understand the full context of changes
+
+PROACTIVELY use multiple sub-agents for comprehensive review!
+""",
+            "planner": """
+SUB-AGENTS AVAILABLE - Use these for better planning:
+- Use the Task tool with subagent_type='Explore' to understand the codebase architecture
+- Use the Task tool with subagent_type='architect-review' for architectural assessment
+- Use the Task tool with subagent_type='legacy-modernizer' to identify technical debt
+- Use the Task tool with subagent_type='dx-optimizer' to find developer experience improvements
+- Use the Task tool with subagent_type='docs-architect' to identify documentation gaps
+
+PROACTIVELY use sub-agents to discover valuable improvements!
+""",
+            "fixer": """
+SUB-AGENTS AVAILABLE - Use these to fix review feedback:
+- Use the Task tool with subagent_type='debugger' if fixes cause unexpected issues
+- Use the Task tool with subagent_type='code-reviewer' to verify your fixes before pushing
+- Use the Task tool with subagent_type='Explore' to understand related code that might be affected
+
+PROACTIVELY use sub-agents to ensure fixes are correct!
+"""
+        }
+
+        return instructions.get(role, "")
 
     def _run_claude(self, prompt: str, working_dir: Optional[Path] = None) -> AgentResult:
         """
@@ -368,7 +445,25 @@ class ClaudeOrchestra:
 
         This agent reads the TODO list, selects the highest priority task,
         implements it, and creates a feature branch with the changes.
+
+        If a task_queue was provided, it will work through those tasks first
+        before reverting to autonomous task selection from TODO.md.
         """
+        # Check if we have queued tasks to work on
+        queued_task = None
+        if self.task_queue and self.current_task_index < len(self.task_queue):
+            queued_task = self.task_queue[self.current_task_index]
+            self.current_task_index += 1
+            logger.info(f"Working on queued task {self.current_task_index}/{len(self.task_queue)}: {queued_task[:60]}...")
+
+        # Build user guidance section
+        user_guidance_section = ""
+        if self.guidance:
+            user_guidance_section = f"""
+USER GUIDANCE (follow these instructions carefully):
+{self.guidance}
+"""
+
         # Build task guidance based on mode
         if self.task_mode == "small":
             task_guidance = """IMPORTANT: Choose tasks that can realistically be completed in under 20 minutes.
@@ -383,26 +478,48 @@ You have plenty of time, so focus on quality and completeness."""
             task_guidance = """Select appropriately sized tasks - not trivial one-liners, but not massive multi-day features either.
 If a task seems very large, consider implementing a meaningful subset and noting what remains."""
 
+        # Build the task selection instructions based on whether we have a queued task
+        if queued_task:
+            task_selection = f"""SPECIFIC TASK TO IMPLEMENT (from user's queue):
+{queued_task}
+
+This task was specifically selected by the user. Implement it as described.
+Find this task in TODO.md (or a related planning document) and mark it appropriately."""
+        elif task_description:
+            task_selection = f"""SPECIFIC TASK TO IMPLEMENT:
+{task_description}"""
+        else:
+            task_selection = f"""TASK SELECTION:
+Look for TODO/task files in these locations (check all that exist):
+- TODO.md (root)
+- docs/TODO.md
+- docs/TASKS.md
+- docs/WORK_ALLOCATION.md
+
+Find incomplete tasks (marked with [ ] or - [ ] or similar).
+Select the most appropriate task based on priority and the guidance above.
+
+{task_guidance}"""
+
+        subagent_instructions = self._get_subagent_instructions("implementer")
+
         prompt = f"""You are the IMPLEMENTER agent in an autonomous development pipeline.
+{user_guidance_section}
+Your task: Implement the specified task (or select one from TODO.md if none specified).
 
-Your task: Read the TODO.md file, select the highest priority incomplete task, and implement it.
-
-{task_guidance}
-
+{task_selection}
+{subagent_instructions}
 Instructions:
-1. Read TODO.md to find incomplete tasks (marked with [ ] or similar)
-2. Select the most appropriate task based on priority and the guidance above
-3. IMMEDIATELY mark the task as in-progress in TODO.md and commit this change
-4. Create a new feature branch with a descriptive name
-5. Implement the feature/fix thoroughly
-6. Mark the task as complete in TODO.md
-7. Commit your changes with clear commit messages
-8. When done, output a summary including:
+1. {"Find the specified task in TODO.md or docs/TODO.md" if queued_task else "Check TODO.md, docs/TODO.md, docs/TASKS.md for incomplete tasks"}
+2. IMMEDIATELY mark the task as in-progress in the TODO file (wherever you found it) and commit this change
+3. Create a new feature branch with a descriptive name
+4. Implement the feature/fix thoroughly
+5. Mark the task as complete in the TODO file
+6. Commit your changes with clear commit messages
+7. When done, output a summary including:
    - BRANCH_NAME: <the branch you created>
    - TASK_COMPLETED: <description of what was implemented>
    - FILES_CHANGED: <list of modified files>
-
-{f"Specific task to implement: {task_description}" if task_description else ""}
 
 Work autonomously until the implementation is complete. Be thorough but pragmatic.
 """
@@ -427,11 +544,12 @@ Work autonomously until the implementation is complete. Be thorough but pragmati
         when everything is working.
         """
         branch_context = f"on branch '{branch_name}'" if branch_name else "on the current feature branch"
+        subagent_instructions = self._get_subagent_instructions("tester")
 
         prompt = f"""You are the TESTER agent in an autonomous development pipeline.
 
 Your task: Thoroughly test the recent changes {branch_context} and create a PR if tests pass.
-
+{subagent_instructions}
 Instructions:
 1. Identify the current feature branch (or checkout {branch_name} if specified)
 2. Run the project's test suite (look for pytest, npm test, etc.)
@@ -476,11 +594,12 @@ Be thorough with testing. Check edge cases. Don't create a PR until tests pass.
         the PR or requests changes with specific feedback.
         """
         pr_context = f"PR #{pr_number}" if pr_number else "the most recent open PR"
+        subagent_instructions = self._get_subagent_instructions("reviewer")
 
         prompt = f"""You are the REVIEWER agent in an autonomous development pipeline.
 
 Your task: Perform a thorough code review of {pr_context}.
-
+{subagent_instructions}
 Instructions:
 1. Fetch the PR details using `gh pr view {pr_number if pr_number else ''}`
 2. Review the diff using `gh pr diff {pr_number if pr_number else ''}`
@@ -566,6 +685,8 @@ Be constructive but thorough. Good code review improves the entire codebase.
         This agent takes the review feedback and makes the necessary changes
         to address the reviewer's concerns.
         """
+        subagent_instructions = self._get_subagent_instructions("fixer")
+
         prompt = f"""You are the FIXER agent in an autonomous development pipeline.
 
 Your task: Address the code review feedback and push fixes to the existing PR.
@@ -575,7 +696,7 @@ PR Number: {pr_number if pr_number else 'current'}
 
 REVIEW FEEDBACK TO ADDRESS:
 {review_feedback}
-
+{subagent_instructions}
 Instructions:
 1. Checkout the branch: {branch_name}
 2. Carefully read and understand each piece of feedback
@@ -605,12 +726,14 @@ Be thorough - address ALL feedback points. Don't leave anything unresolved.
         This agent analyzes the codebase and suggests improvements,
         new features, refactors, or optimizations.
         """
+        subagent_instructions = self._get_subagent_instructions("planner")
+
         prompt = f"""You are the PLANNER agent in an autonomous development pipeline.
 
-Your task: Analyze the codebase and add valuable new tasks to TODO.md.
-
+Your task: Analyze the codebase and add valuable new tasks to the project's TODO file (docs/TODO.md or TODO.md).
+{subagent_instructions}
 Instructions:
-1. Read the current TODO.md to understand existing plans
+1. Read the current TODO file (check TODO.md, docs/TODO.md, docs/TASKS.md) to understand existing plans
 2. Explore the codebase structure and code quality
 3. Identify opportunities for:
    - New features that would add value
@@ -624,7 +747,7 @@ Instructions:
    - Impact (high/medium/low)
    - Effort (high/medium/low)
    - Priority based on impact/effort ratio
-5. Add 3-5 new well-described tasks to TODO.md:
+5. Add 3-5 new well-described tasks to the project's TODO file:
    - Clear, actionable descriptions
    - Priority indicators
    - Brief rationale
@@ -955,6 +1078,23 @@ Examples:
         type=float,
         help="Maximum hours to run in continuous mode (e.g., 1 for 1 hour)"
     )
+    parser.add_argument(
+        "--guidance",
+        type=str,
+        default="",
+        help="Initial guidance/instructions for the implementer agent"
+    )
+    parser.add_argument(
+        "--task-queue",
+        type=str,
+        default="",
+        help="JSON array of tasks to work on (e.g., '[\"task1\", \"task2\"]')"
+    )
+    parser.add_argument(
+        "--use-subagents",
+        action="store_true",
+        help="Enable use of specialized sub-agents (code-reviewer, test-automator, debugger, etc.)"
+    )
 
     args = parser.parse_args()
 
@@ -965,6 +1105,17 @@ Examples:
         create_sample_todo(project_path)
         return
 
+    # Parse task queue from JSON if provided
+    task_queue = []
+    if args.task_queue:
+        try:
+            task_queue = json.loads(args.task_queue)
+            if not isinstance(task_queue, list):
+                task_queue = []
+        except json.JSONDecodeError:
+            logger.warning("Invalid task-queue JSON, ignoring")
+            task_queue = []
+
     # Initialize orchestra
     try:
         orchestra = ClaudeOrchestra(
@@ -972,7 +1123,10 @@ Examples:
             timeout=args.timeout,
             model=args.model,
             stream=not args.no_stream,
-            task_mode=args.task_mode
+            task_mode=args.task_mode,
+            guidance=args.guidance,
+            task_queue=task_queue,
+            use_subagents=args.use_subagents
         )
     except ValueError as e:
         logger.error(str(e))
