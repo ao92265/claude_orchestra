@@ -22,6 +22,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 def create_project_state():
     return {
         "running": False,
+        "project_id": None,
         "project_path": None,
         "current_cycle": 0,
         "current_stage": None,
@@ -909,11 +910,21 @@ HTML_TEMPLATE = """
         }
 
         socket.on('state_update', function(state) {
-            updateUI(state);
+            // Only update UI if this is for the current project or no project selected
+            if (!state.project_id || state.project_id === currentProjectId || currentProjectId === 'new') {
+                // For 'new' project, only update if state is for the initially loaded global state
+                if (currentProjectId === 'new' && state.project_id && state.running) {
+                    return; // Don't update "new project" view with running project's updates
+                }
+                updateUI(state);
+            }
         });
 
         socket.on('log_line', function(data) {
-            addLogLine(data.line);
+            // Only add log line if it's for the current project or no project specified
+            if (!data.project_id || data.project_id === currentProjectId) {
+                addLogLine(data.line);
+            }
         });
 
         socket.on('activity_update', function(data) {
@@ -1098,6 +1109,65 @@ HTML_TEMPLATE = """
                 var prList = document.getElementById('prList');
                 prList.textContent = '';
                 state.prs_created.forEach(function(pr) { addPR(pr, false); });
+            }
+
+            // Restore log lines when switching projects
+            if (state.log_lines && state.log_lines.length > 0) {
+                var logContent = document.getElementById('logContent');
+                logContent.innerHTML = '';
+                state.log_lines.forEach(function(line) {
+                    addLogLine(line);
+                });
+            }
+
+            // Restore activity stats
+            if (state.branches_created !== undefined) {
+                document.getElementById('branchesCreated').textContent = state.branches_created || 0;
+            }
+            if (state.current_branch) {
+                document.getElementById('currentBranch').textContent = state.current_branch;
+            }
+            if (state.files_changed !== undefined) {
+                document.getElementById('filesChanged').textContent = state.files_changed || 0;
+            }
+            if (state.last_file) {
+                document.getElementById('lastFile').textContent = state.last_file.split('/').pop();
+            }
+            if (state.subagent_count !== undefined) {
+                document.getElementById('subAgentCount').textContent = state.subagent_count || 0;
+            }
+            if (state.active_subagent) {
+                document.getElementById('activeSubAgent').textContent = state.active_subagent;
+            }
+            if (state.tools_used !== undefined) {
+                document.getElementById('toolsUsed').textContent = state.tools_used || 0;
+            }
+            if (state.last_tool) {
+                document.getElementById('lastTool').textContent = state.last_tool;
+            }
+
+            // Restore activity log
+            if (state.activity_log && state.activity_log.length > 0) {
+                var activityLog = document.getElementById('activityLog');
+                activityLog.innerHTML = '';
+                state.activity_log.forEach(function(entry) {
+                    var li = document.createElement('li');
+                    li.className = 'pr-item';
+                    li.innerHTML = '<span style="color: #58a6ff;">' + entry.type + '</span> ' + entry.message;
+                    activityLog.appendChild(li);
+                });
+            }
+
+            // Restore sub-agents list
+            if (state.subagents_used && state.subagents_used.length > 0) {
+                var subagentsList = document.getElementById('subagentsList');
+                subagentsList.innerHTML = '';
+                state.subagents_used.forEach(function(agent) {
+                    var li = document.createElement('li');
+                    li.className = 'pr-item';
+                    li.textContent = agent;
+                    subagentsList.appendChild(li);
+                });
             }
         }
 
@@ -1342,17 +1412,13 @@ HTML_TEMPLATE = """
                         dirList.appendChild(parentDiv);
                     }
 
-                    // Add directories
+                    // Add directories - single click navigates into folder
                     (data.dirs || []).forEach(function(dir) {
                         var div = document.createElement('div');
                         div.className = 'dir-item';
                         div.innerHTML = '<span class="dir-icon">📁</span><span class="dir-name">' + dir + '</span>';
-                        div.ondblclick = function() {
-                            navigateTo(path + (path.endsWith('/') ? '' : '/') + dir);
-                        };
                         div.onclick = function() {
-                            document.querySelectorAll('.dir-item').forEach(el => el.classList.remove('selected'));
-                            div.classList.add('selected');
+                            navigateTo(path + (path.endsWith('/') ? '' : '/') + dir);
                         };
                         dirList.appendChild(div);
                     });
@@ -1647,6 +1713,7 @@ def handle_start(data):
     # Create new project state
     project_state = create_project_state()
     project_state["running"] = True
+    project_state["project_id"] = project_id
     project_state["project_path"] = project_path
     project_state["start_time"] = datetime.now().isoformat()
     project_state["max_hours"] = max_hours
@@ -1735,7 +1802,12 @@ def handle_start(data):
                 if remaining:
                     for line in remaining.split('\n'):
                         if line.strip():
-                            socketio.emit('log_line', {'line': f'[{pid}] ' + line.strip()})
+                            log_text = f'[{pid}] ' + line.strip()
+                            state['log_lines'].append(log_text)
+                            # Keep last 500 lines to prevent memory bloat
+                            if len(state['log_lines']) > 500:
+                                state['log_lines'] = state['log_lines'][-500:]
+                            socketio.emit('log_line', {'line': log_text, 'project_id': pid})
                 break
 
             # Non-blocking check if data is available (0.5s timeout)
@@ -1746,7 +1818,12 @@ def handle_start(data):
             line = state["process"].stdout.readline()
             if line:
                 line_text = line.strip()
-                socketio.emit('log_line', {'line': f'[{pid}] ' + line_text})
+                log_text = f'[{pid}] ' + line_text
+                state['log_lines'].append(log_text)
+                # Keep last 500 lines to prevent memory bloat
+                if len(state['log_lines']) > 500:
+                    state['log_lines'] = state['log_lines'][-500:]
+                socketio.emit('log_line', {'line': log_text, 'project_id': pid})
 
                 # Parse stage transitions
                 if '[STAGE 1]' in line_text or 'IMPLEMENTER' in line_text.upper():
