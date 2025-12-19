@@ -836,13 +836,25 @@ HTML_TEMPLATE = """
                 document.getElementById('projectPath').value = '';
                 document.getElementById('startBtn').disabled = false;
                 document.getElementById('stopBtn').disabled = true;
-                document.getElementById('statusBadge').textContent = 'Stopped';
+                document.getElementById('statusBadge').textContent = 'New Project';
                 document.getElementById('statusBadge').className = 'status-badge status-stopped';
                 // Clear the activity panels
-                document.getElementById('logContent').innerHTML = '';
+                document.getElementById('logContent').innerHTML = '<div class="log-line log-line-stage">Select a project folder and click "Start Orchestra" to begin</div>';
                 document.getElementById('activityLog').innerHTML = '<li class="pr-item" style="color: #8b949e;">No activity yet</li>';
                 document.getElementById('subagentsList').innerHTML = '<li class="pr-item" style="color: #8b949e;">None yet</li>';
                 document.getElementById('prList').innerHTML = '<li class="pr-item" style="color: #8b949e;">No PRs yet</li>';
+                // Reset stats
+                document.getElementById('currentCycle').textContent = '0';
+                document.getElementById('cyclesCompleted').textContent = '0';
+                document.getElementById('prsCreated').textContent = '0';
+                document.getElementById('timeElapsed').textContent = '00:00';
+                document.getElementById('branchesCreated').textContent = '0';
+                document.getElementById('filesChanged').textContent = '0';
+                document.getElementById('subAgentCount').textContent = '0';
+                document.getElementById('toolsUsed').textContent = '0';
+                // Focus the project path input and open browser
+                document.getElementById('projectPath').focus();
+                openBrowser();
             } else {
                 // Load existing project state
                 socket.emit('get_project_state', { project_id: projectId });
