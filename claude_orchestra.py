@@ -97,6 +97,7 @@ class ClaudeOrchestra:
         todo_file: str = "TODO.md",
         timeout: int = 1800,  # 30 minutes default per agent
         model: str = "sonnet",  # or "opus" for more complex tasks
+        planner_model: str = "haiku",  # OPTIMIZED: Use cheaper model for planner
         stream: bool = True,  # Stream output in real-time
         task_mode: str = "normal",  # "small", "normal", or "large"
         guidance: str = "",  # Initial guidance for the implementer
@@ -107,13 +108,14 @@ class ClaudeOrchestra:
         self.todo_file = self.project_path / todo_file
         self.timeout = timeout
         self.model = model
+        self.planner_model = planner_model  # Separate model for planner (cost optimization)
         self.stream = stream
         self.task_mode = task_mode
         self.guidance = guidance
         self.task_queue = task_queue or []
         self.current_task_index = 0  # Track which queued task we're on
         self.use_subagents = use_subagents
-        
+
         # Initialize ProcessManager for subprocess lifecycle management
         self.process_manager = get_process_manager()
 
@@ -122,6 +124,7 @@ class ClaudeOrchestra:
             raise ValueError(f"Project path does not exist: {self.project_path}")
 
         logger.info(f"Initialized Claude Orchestra for project: {self.project_path}")
+        logger.info(f"Models: main={self.model}, planner={self.planner_model}")
         if self.guidance:
             logger.info(f"Initial guidance: {self.guidance[:100]}...")
         if self.task_queue:
@@ -135,83 +138,49 @@ class ClaudeOrchestra:
 
         These instructions tell Claude to leverage specialized sub-agents
         available through the Task tool for better results.
+
+        OPTIMIZED: Consolidated from ~50 lines to ~10 lines total.
+        Saves ~400-500 tokens per cycle while maintaining effectiveness.
         """
         if not self.use_subagents:
             return ""
 
-        instructions = {
-            "implementer": """
-SUB-AGENTS AVAILABLE - Use these for better results:
-- Use the Task tool with subagent_type='Explore' to quickly understand unfamiliar parts of the codebase
-- Use the Task tool with subagent_type='debugger' if you encounter errors or unexpected behavior
-- Use the Task tool with subagent_type='code-reviewer' to self-review your code before committing
-- Use the Task tool with subagent_type='Plan' to design complex implementations before coding
-- For database work, use subagent_type='database-architect' or 'database-optimizer'
-- For API work, use subagent_type='backend-architect' or 'fastapi-pro' / 'django-pro'
+        # Shared base instruction - available to all roles
+        base = "SUB-AGENTS: Use Task tool with subagent_type for: Explore (codebase search), debugger (errors), code-reviewer (quality), Plan (architecture)."
 
-PROACTIVELY use sub-agents - they improve code quality significantly!
-""",
-            "tester": """
-SUB-AGENTS AVAILABLE - Use these for better results:
-- Use the Task tool with subagent_type='test-automator' to create comprehensive test suites
-- Use the Task tool with subagent_type='debugger' to investigate and fix test failures
-- Use the Task tool with subagent_type='e2e-testing-patterns' for end-to-end tests
-- Use the Task tool with subagent_type='performance-engineer' for performance testing
-- Use the Task tool with subagent_type='Explore' to understand what code needs testing
-
-PROACTIVELY use sub-agents for thorough test coverage!
-""",
-            "reviewer": """
-SUB-AGENTS AVAILABLE - Use these for thorough review:
-- Use the Task tool with subagent_type='code-reviewer' for detailed code quality analysis
-- Use the Task tool with subagent_type='security-auditor' for security vulnerability assessment
-- Use the Task tool with subagent_type='architect-review' for architectural review
-- Use the Task tool with subagent_type='performance-engineer' for performance review
-- Use the Task tool with subagent_type='Explore' to understand the full context of changes
-
-PROACTIVELY use multiple sub-agents for comprehensive review!
-""",
-            "planner": """
-SUB-AGENTS AVAILABLE - Use these for better planning:
-- Use the Task tool with subagent_type='Explore' to understand the codebase architecture
-- Use the Task tool with subagent_type='architect-review' for architectural assessment
-- Use the Task tool with subagent_type='legacy-modernizer' to identify technical debt
-- Use the Task tool with subagent_type='dx-optimizer' to find developer experience improvements
-- Use the Task tool with subagent_type='docs-architect' to identify documentation gaps
-
-PROACTIVELY use sub-agents to discover valuable improvements!
-""",
-            "fixer": """
-SUB-AGENTS AVAILABLE - Use these to fix review feedback:
-- Use the Task tool with subagent_type='debugger' if fixes cause unexpected issues
-- Use the Task tool with subagent_type='code-reviewer' to verify your fixes before pushing
-- Use the Task tool with subagent_type='Explore' to understand related code that might be affected
-
-PROACTIVELY use sub-agents to ensure fixes are correct!
-"""
+        # Role-specific hints (single line each)
+        role_hints = {
+            "implementer": "Also: backend-architect, database-optimizer for specialized work. Self-review before committing.",
+            "tester": "Also: test-automator, performance-engineer. Investigate failures thoroughly.",
+            "reviewer": "Also: security-auditor, architect-review, performance-engineer. Use multiple for comprehensive review.",
+            "planner": "Also: architect-review, dx-optimizer, docs-architect. Discover improvement opportunities.",
+            "fixer": "Verify fixes with code-reviewer before pushing."
         }
 
-        return instructions.get(role, "")
+        hint = role_hints.get(role, "")
+        return f"\n{base} {hint} Use proactively!\n"
 
-    def _run_claude(self, prompt: str, working_dir: Optional[Path] = None) -> AgentResult:
+    def _run_claude(self, prompt: str, working_dir: Optional[Path] = None, model_override: Optional[str] = None) -> AgentResult:
         """
         Run Claude Code CLI in headless mode with autonomous permissions.
 
         Args:
             prompt: The task prompt to send to Claude
             working_dir: Working directory for the command (defaults to project_path)
+            model_override: Optional model to use instead of self.model (for cost optimization)
 
         Returns:
             AgentResult with the execution results
         """
         cwd = working_dir or self.project_path
+        model = model_override or self.model
 
         if self.stream:
             cmd = [
                 "claude",
                 "-p", prompt,
                 "--dangerously-skip-permissions",
-                "--model", self.model,
+                "--model", model,
                 "--output-format", "stream-json",
                 "--verbose"  # Required for stream-json with -p
             ]
@@ -220,11 +189,11 @@ PROACTIVELY use sub-agents to ensure fixes are correct!
                 "claude",
                 "-p", prompt,
                 "--dangerously-skip-permissions",
-                "--model", self.model,
+                "--model", model,
                 "--output-format", "text"
             ]
 
-        logger.info(f"Running Claude with prompt: {prompt[:100]}...")
+        logger.info(f"Running Claude ({model}) with prompt: {prompt[:100]}...")
 
         if self.stream:
             return self._run_claude_streaming(cmd, cwd)
@@ -788,6 +757,9 @@ Be thorough - address ALL feedback points. Don't leave anything unresolved.
 
         This agent analyzes the codebase and suggests improvements,
         new features, refactors, or optimizations.
+
+        OPTIMIZED: Uses planner_model (default: haiku) for cost savings.
+        Planner tasks don't require complex coding, so a faster/cheaper model works well.
         """
         subagent_instructions = self._get_subagent_instructions("planner")
 
@@ -822,7 +794,8 @@ Instructions:
 Focus on practical improvements that will genuinely help the project.
 """
 
-        result = self._run_claude(prompt)
+        # Use planner-specific model (default: haiku) for cost optimization
+        result = self._run_claude(prompt, model_override=self.planner_model)
         result.role = AgentRole.PLANNER
 
         return result
@@ -923,10 +896,21 @@ Focus on practical improvements that will genuinely help the project.
             results['fix_iterations'] = fix_results
             results['total_review_iterations'] = review_iteration
 
-        # Stage 4: Planning (always runs)
-        logger.info("\n[STAGE 4] Running Planner Agent...")
-        plan_result = self.run_planner()
-        results['planner'] = plan_result
+        # Stage 4: Planning (only on successful cycles to save tokens)
+        # OPTIMIZED: Skip planner when cycle failed - saves ~1,800-3,500 tokens
+        cycle_successful = (
+            review_result is not None and
+            review_result.review_decision == "APPROVED"
+        )
+
+        if cycle_successful:
+            logger.info("\n[STAGE 4] Running Planner Agent...")
+            plan_result = self.run_planner()
+            results['planner'] = plan_result
+        else:
+            logger.info("\n[STAGE 4] Skipping Planner Agent (cycle not successful)")
+            logger.info("Planner runs only on approved PRs to optimize token usage")
+            results['planner_skipped'] = True
 
         # Final summary
         logger.info("\n" + "=" * 60)
@@ -1112,7 +1096,13 @@ Examples:
         "--model",
         choices=["sonnet", "opus", "haiku"],
         default="sonnet",
-        help="Claude model to use (default: sonnet)"
+        help="Claude model for main agents (default: sonnet)"
+    )
+    parser.add_argument(
+        "--planner-model",
+        choices=["sonnet", "opus", "haiku"],
+        default="haiku",
+        help="Claude model for planner agent (default: haiku for cost savings)"
     )
     parser.add_argument(
         "--task-mode",
@@ -1185,6 +1175,7 @@ Examples:
             project_path=str(project_path),
             timeout=args.timeout,
             model=args.model,
+            planner_model=args.planner_model,
             stream=not args.no_stream,
             task_mode=args.task_mode,
             guidance=args.guidance,
@@ -1205,12 +1196,15 @@ Examples:
         print("=" * 60)
 
         for key, value in results.items():
-            # Handle fix_iterations list separately
+            # Handle special keys
             if key == 'fix_iterations':
                 print(f"  Fix iterations: {len(value)}")
                 continue
             if key == 'total_review_iterations':
                 print(f"  Total review rounds: {value}")
+                continue
+            if key == 'planner_skipped':
+                print("SKIP PLANNER: Skipped (PR not approved - saved tokens)")
                 continue
 
             # Regular agent results
