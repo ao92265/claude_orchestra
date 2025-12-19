@@ -404,23 +404,33 @@ def _get_claims_data_sync() -> Dict:
             await coordinator.setup()
             claims = await coordinator.get_all_active_claims()
             agent_id = coordinator.agent.agent_id if coordinator.agent else None
+
+            # Get issue titles for better display
+            claim_data = []
+            for c in claims:
+                try:
+                    issue = await coordinator.github.get_issue(c.issue_number)
+                    title = issue.get('title', f'Issue #{c.issue_number}')
+                except:
+                    title = f'Issue #{c.issue_number}'
+
+                claim_data.append({
+                    'issue_number': c.issue_number,
+                    'title': title,
+                    'agent_id': c.agent_id,
+                    'github_username': c.github_username,
+                    'claimed_at': c.claimed_at,
+                    'last_heartbeat': c.last_heartbeat,
+                    'branch_name': c.branch_name,
+                    'is_mine': c.agent_id == agent_id if agent_id else False,
+                    'age_minutes': _calculate_age_minutes(c.last_heartbeat)
+                })
+
             await coordinator.close()
 
             return {
                 'enabled': True,
-                'claims': [
-                    {
-                        'issue_number': c.issue_number,
-                        'agent_id': c.agent_id,
-                        'github_username': c.github_username,
-                        'claimed_at': c.claimed_at,
-                        'last_heartbeat': c.last_heartbeat,
-                        'branch_name': c.branch_name,
-                        'is_mine': c.agent_id == agent_id if agent_id else False,
-                        'age_minutes': _calculate_age_minutes(c.last_heartbeat)
-                    }
-                    for c in claims
-                ],
+                'claims': claim_data,
                 'my_agent_id': agent_id
             }
 

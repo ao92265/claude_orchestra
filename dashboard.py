@@ -2927,10 +2927,16 @@ HTML_TEMPLATE = """
                 const isWarning = age > 15;
                 const heartbeatClass = isStale ? 'stale' : (isWarning ? 'warning' : 'fresh');
                 const ageText = age < 1 ? 'just now' : age + 'm ago';
+                const title = claim.title ? (claim.title.length > 40 ? claim.title.substring(0, 40) + '...' : claim.title) : '';
+                const username = claim.github_username || 'unknown';
 
                 return '<li class="claim-item ' + (isMine ? 'mine' : '') + ' ' + (isStale ? 'stale' : '') + '">' +
-                    '<div class="claim-issue">#' + claim.issue_number + (isMine ? ' (you)' : '') + '</div>' +
-                    '<div class="claim-agent">' + claim.agent_id.substring(0, 25) + '...</div>' +
+                    '<div class="claim-issue">' +
+                        '<strong>#' + claim.issue_number + '</strong> ' +
+                        '<span style="color: #58a6ff;">@' + username + '</span>' +
+                        (isMine ? ' <span style="color: #3fb950;">(you)</span>' : '') +
+                    '</div>' +
+                    '<div class="claim-title" style="font-size: 11px; color: #c9d1d9; margin: 2px 0;">' + escapeHtml(title) + '</div>' +
                     '<div class="claim-meta">' +
                         '<span class="heartbeat-indicator"><span class="heartbeat-dot ' + heartbeatClass + '"></span>' + ageText + '</span>' +
                         (isMine ? '<button class="claim-release-btn" onclick="releaseClaim(' + claim.issue_number + ')">Release</button>' : '') +
