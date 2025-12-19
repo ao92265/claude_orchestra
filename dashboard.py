@@ -789,7 +789,12 @@ HTML_TEMPLATE = """
         });
 
         function updateProjectTabs() {
+            console.log('updateProjectTabs called, projectsData:', projectsData);
             var tabs = document.getElementById('projectTabs');
+            if (!tabs) {
+                console.error('projectTabs element not found!');
+                return;
+            }
             tabs.innerHTML = '';
 
             // Add tabs for each project
@@ -814,22 +819,30 @@ HTML_TEMPLATE = """
             var addTab = document.createElement('div');
             addTab.className = 'project-tab' + (currentProjectId === 'new' ? ' active' : '');
             addTab.setAttribute('data-project', 'new');
-            addTab.onclick = function() { selectProject('new'); };
+            addTab.onclick = function() { console.log('Add tab clicked'); selectProject('new'); };
             addTab.innerHTML = '<span class="tab-icon">➕</span><span class="tab-name">Add Project</span>';
             tabs.appendChild(addTab);
+            console.log('Tabs updated, children count:', tabs.children.length);
         }
 
         function selectProject(projectId) {
+            console.log('selectProject called with:', projectId);
             currentProjectId = projectId;
             updateProjectTabs();
 
             if (projectId === 'new') {
                 // Reset form for new project
+                console.log('Resetting form for new project');
                 document.getElementById('projectPath').value = '';
                 document.getElementById('startBtn').disabled = false;
                 document.getElementById('stopBtn').disabled = true;
                 document.getElementById('statusBadge').textContent = 'Stopped';
                 document.getElementById('statusBadge').className = 'status-badge status-stopped';
+                // Clear the activity panels
+                document.getElementById('logContent').innerHTML = '';
+                document.getElementById('activityLog').innerHTML = '<li class="pr-item" style="color: #8b949e;">No activity yet</li>';
+                document.getElementById('subagentsList').innerHTML = '<li class="pr-item" style="color: #8b949e;">None yet</li>';
+                document.getElementById('prList').innerHTML = '<li class="pr-item" style="color: #8b949e;">No PRs yet</li>';
             } else {
                 // Load existing project state
                 socket.emit('get_project_state', { project_id: projectId });
@@ -1274,7 +1287,13 @@ HTML_TEMPLATE = """
         }
 
         function openBrowser() {
-            document.getElementById('dirBrowserModal').classList.add('active');
+            console.log('openBrowser called');
+            var modal = document.getElementById('dirBrowserModal');
+            console.log('Modal element:', modal);
+            if (modal) {
+                modal.classList.add('active');
+                console.log('Added active class');
+            }
             var startPath = document.getElementById('projectPath').value || '/Users';
             navigateTo(startPath);
         }
@@ -1871,4 +1890,4 @@ if __name__ == '__main__':
     print("")
     print("Open http://localhost:5050 in your browser")
     print("")
-    socketio.run(app, host='0.0.0.0', port=5050, debug=False)
+    socketio.run(app, host='0.0.0.0', port=5050, debug=False, allow_unsafe_werkzeug=True)
