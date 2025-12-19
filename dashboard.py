@@ -811,7 +811,7 @@ HTML_TEMPLATE = """
                 tab.innerHTML = '<span class="tab-icon">' + icon + '</span>' +
                                '<span class="tab-name">' + id + '</span>' +
                                '<span class="tab-status">' + status + '</span>' +
-                               '<span class="tab-close" onclick="event.stopPropagation(); removeProject(\'' + id + '\')">&times;</span>';
+                               '<span class="tab-close" onclick="event.stopPropagation(); removeProject(\\'' + id + '\\')">&times;</span>';
                 tabs.appendChild(tab);
             });
 
