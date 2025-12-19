@@ -281,6 +281,26 @@ class GitHubClient:
             return resp.status, response_data
 
     # -------------------------------------------------------------------------
+    # Repository
+    # -------------------------------------------------------------------------
+
+    async def verify_repo_access(self) -> Dict:
+        """Verify the token has access to the repository."""
+        status, data = await self._request(
+            "GET",
+            f"/repos/{self.owner}/{self.repo}"
+        )
+        if status == 404:
+            raise GitHubAPIError(
+                f"Repository '{self.owner}/{self.repo}' not found or not accessible. "
+                f"Check that the repo exists and your token has 'repo' scope.",
+                status
+            )
+        if status != 200:
+            raise GitHubAPIError(f"Failed to access repository: {data}", status)
+        return data
+
+    # -------------------------------------------------------------------------
     # Labels
     # -------------------------------------------------------------------------
 
@@ -291,6 +311,12 @@ class GitHubClient:
             f"/repos/{self.owner}/{self.repo}/labels",
             params={"per_page": 100}
         )
+        if status == 404:
+            raise GitHubAPIError(
+                f"Cannot access labels for '{self.owner}/{self.repo}'. "
+                f"Repository not found or token lacks 'repo' scope.",
+                status
+            )
         if status != 200:
             raise GitHubAPIError(f"Failed to get labels: {data}", status)
         return data
@@ -529,6 +555,9 @@ class TaskCoordinator:
         logger.info(f"  Agent ID: {self.agent.agent_id}")
         logger.info(f"  GitHub User: {github_username}")
         logger.info(f"  Repo: {self.repo_owner}/{self.repo_name}")
+
+        # Verify repo access first
+        await self.github.verify_repo_access()
 
         # Ensure labels exist
         await self.github.ensure_labels_exist()

@@ -81,8 +81,12 @@ def register_claims_handlers(socketio, app, coordinator=None, config=None):
         from flask_socketio import emit
         global _setup_state
 
-        _setup_state['github_token'] = data.get('github_token', '')
-        repo = data.get('repo', '')
+        # Only update token if provided (preserve existing if field is empty)
+        new_token = data.get('github_token', '').strip()
+        if new_token:
+            _setup_state['github_token'] = new_token
+
+        repo = data.get('repo', '').strip()
         if '/' in repo:
             _setup_state['repo_owner'], _setup_state['repo_name'] = repo.split('/', 1)
         _setup_state['claim_timeout'] = int(data.get('claim_timeout', 1800))
