@@ -366,6 +366,22 @@ def _load_config_from_env():
     )
 
 
+def get_multiuser_config() -> Dict:
+    """Get multi-user configuration for use by other modules (like dashboard).
+
+    Returns full config including token for subprocess environment setup.
+    """
+    return {
+        'enabled': _setup_state['configured'],
+        'github_token': _setup_state['github_token'],
+        'repo_owner': _setup_state['repo_owner'],
+        'repo_name': _setup_state['repo_name'],
+        'repo': f"{_setup_state['repo_owner']}/{_setup_state['repo_name']}" if _setup_state['repo_owner'] else '',
+        'claim_timeout': _setup_state['claim_timeout'],
+        'heartbeat_interval': _setup_state['heartbeat_interval'],
+    }
+
+
 def _get_safe_config() -> Dict:
     """Get configuration without exposing full token."""
     token = _setup_state['github_token']

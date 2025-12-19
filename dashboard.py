@@ -18,7 +18,7 @@ from process_manager import get_process_manager
 
 # Multi-user mode support
 try:
-    from dashboard_claims import register_claims_handlers, get_multiuser_html_components
+    from dashboard_claims import register_claims_handlers, get_multiuser_html_components, get_multiuser_config
     MULTIUSER_AVAILABLE = True
 except ImportError:
     MULTIUSER_AVAILABLE = False
@@ -3363,9 +3363,24 @@ def handle_start(data):
 
         open(log_file, 'w').close()
 
+        # Check if multi-user mode is enabled
+        multiuser_config = None
+        if MULTIUSER_AVAILABLE:
+            multiuser_config = get_multiuser_config()
+
+        # Choose the right orchestra script based on multi-user mode
+        if multiuser_config and multiuser_config.get('enabled'):
+            # Use multi-user orchestra - claims tasks from GitHub Issues
+            orchestra_script = os.path.join(script_dir, 'orchestra_multi_user.py')
+            logger.info(f"Using multi-user orchestra with repo: {multiuser_config['repo']}")
+        else:
+            # Use standard orchestra - reads from TODO.md
+            orchestra_script = os.path.join(script_dir, 'claude_orchestra.py')
+            logger.info("Using standard orchestra (no multi-user)")
+
         cmd = [
             'python3', '-u',  # Unbuffered output for real-time streaming
-            os.path.join(script_dir, 'claude_orchestra.py'),
+            orchestra_script,
             '--project', project_path,
             '--continuous',
             '--timeout', '1800',  # 30 minutes per agent
@@ -3392,13 +3407,23 @@ def handle_start(data):
         if state.get("use_subagents", True):
             cmd.append('--use-subagents')
 
+        # Set up environment with multi-user config
+        env = os.environ.copy()
+        if multiuser_config and multiuser_config.get('enabled'):
+            env['ORCHESTRA_MULTI_USER'] = 'true'
+            env['GITHUB_TOKEN'] = multiuser_config['github_token']
+            env['GITHUB_REPO'] = multiuser_config['repo']
+            env['ORCHESTRA_CLAIM_TIMEOUT'] = str(multiuser_config['claim_timeout'])
+            env['ORCHESTRA_HEARTBEAT_INTERVAL'] = str(multiuser_config['heartbeat_interval'])
+
         state["process"] = subprocess.Popen(
             cmd,
             cwd=script_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1  # Line buffered for real-time output
+            bufsize=1,  # Line buffered for real-time output
+            env=env
         )
 
         # Track the process for automatic cleanup

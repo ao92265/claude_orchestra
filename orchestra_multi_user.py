@@ -495,6 +495,24 @@ async def main():
         help='Task size preference'
     )
 
+    parser.add_argument(
+        '--guidance',
+        type=str,
+        help='Additional guidance for the agents'
+    )
+
+    parser.add_argument(
+        '--task-queue',
+        type=str,
+        help='JSON string of task queue'
+    )
+
+    parser.add_argument(
+        '--use-subagents',
+        action='store_true',
+        help='Enable sub-agent spawning'
+    )
+
     # Add multi-user arguments
     add_multi_user_args(parser)
 
