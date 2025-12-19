@@ -10,7 +10,7 @@ import subprocess
 import threading
 import time
 import atexit
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, render_template_string, jsonify, request
 from flask_socketio import SocketIO, emit
@@ -71,6 +71,147 @@ orchestra_state = create_project_state()
 # Active project ID for UI focus
 active_project_id = None
 
+# Global usage tracking (across all projects)
+usage_stats = {
+    "requests_today": 0,
+    "requests_this_week": 0,
+    "tokens_estimated": 0,
+    "last_reset_daily": None,
+    "last_reset_weekly": None,
+    "rate_limited": False,
+    "rate_limit_until": None,
+    "history": []  # [{timestamp, requests, tokens}, ...]
+}
+
+# Message queue for queued tasks
+message_queue = []  # [{id, message, project_id, status, created_at}, ...]
+queue_counter = 0
+
+# Summary data for time-based view
+summary_data = {
+    "hourly": {},  # {hour_key: {prs: n, tasks: n, files: n}}
+    "daily": {},   # {date_key: {prs: n, tasks: n, files: n}}
+    "events": []   # [{timestamp, type, description, project_id}, ...]
+}
+
+# Safeguards configuration
+safeguards = {
+    "subagent_timeout_minutes": 30,  # Max time for a sub-agent before warning
+    "known_repos": [],  # List of known repo paths to detect cross-repo activity
+    "alerts": [],  # [{timestamp, type, message, project_id, severity}, ...]
+    "path_violations": [],  # [{timestamp, attempted_path, project_path, project_id}, ...]
+}
+
+def init_known_repos():
+    """Initialize list of known repos for cross-repo detection."""
+    global safeguards
+    repos_path = Path(os.path.expanduser("~/Repos"))
+    if repos_path.exists():
+        safeguards["known_repos"] = [str(p) for p in repos_path.iterdir() if p.is_dir() and (p / ".git").exists()]
+
+def add_safeguard_alert(alert_type, message, project_id=None, severity="warning"):
+    """Add a safeguard alert."""
+    global safeguards
+    alert = {
+        "timestamp": datetime.now().isoformat(),
+        "type": alert_type,
+        "message": message,
+        "project_id": project_id,
+        "severity": severity  # "info", "warning", "critical"
+    }
+    safeguards["alerts"].append(alert)
+    # Keep last 100 alerts
+    if len(safeguards["alerts"]) > 100:
+        safeguards["alerts"] = safeguards["alerts"][-100:]
+    # Emit alert to dashboard
+    socketio.emit('safeguard_alert', alert)
+    # Also log to regular log
+    socketio.emit('log_line', {'line': f'[SAFEGUARD:{severity.upper()}] {message}', 'project_id': project_id})
+    return alert
+
+def check_path_traversal(file_path, project_path, project_id):
+    """Check if a file operation is outside the project directory."""
+    if not file_path or not project_path:
+        return False
+
+    try:
+        # Resolve both paths to absolute
+        file_abs = Path(file_path).resolve()
+        project_abs = Path(project_path).resolve()
+
+        # Check if file is within project
+        try:
+            file_abs.relative_to(project_abs)
+            return False  # File is within project - no violation
+        except ValueError:
+            # File is outside project directory
+            violation = {
+                "timestamp": datetime.now().isoformat(),
+                "attempted_path": str(file_abs),
+                "project_path": str(project_abs),
+                "project_id": project_id
+            }
+            safeguards["path_violations"].append(violation)
+            add_safeguard_alert(
+                "path_traversal",
+                f"Agent attempted to modify file outside project: {file_path}",
+                project_id,
+                "critical"
+            )
+            return True
+    except Exception:
+        return False
+
+def check_cross_repo_activity(line_text, current_project_path, project_id):
+    """Check if output mentions other repos."""
+    if not line_text or not current_project_path:
+        return False
+
+    current_project_name = os.path.basename(current_project_path.rstrip('/'))
+
+    # Check for mentions of other known repos
+    for repo_path in safeguards.get("known_repos", []):
+        repo_name = os.path.basename(repo_path)
+        if repo_name == current_project_name:
+            continue  # Skip current project
+
+        # Check for repo name mentions in suspicious contexts
+        suspicious_patterns = [
+            f"cd {repo_path}",
+            f"cd ~/{repo_name}",
+            f"cd /Users/{repo_name}",
+            f"{repo_path}/",
+            f"/{repo_name}/TODO",
+            f"/{repo_name}/src",
+            f"checkout {repo_name}",
+            f"project: {repo_name}",
+            f"in {repo_name}",
+        ]
+
+        for pattern in suspicious_patterns:
+            if pattern.lower() in line_text.lower():
+                add_safeguard_alert(
+                    "cross_repo",
+                    f"Possible cross-repo activity detected: mentions '{repo_name}' while working on '{current_project_name}'",
+                    project_id,
+                    "warning"
+                )
+                return True
+
+    return False
+
+def get_safeguard_status():
+    """Get current safeguard status for UI."""
+    return {
+        "alerts": safeguards["alerts"][-20:],  # Last 20 alerts
+        "path_violations_count": len(safeguards["path_violations"]),
+        "recent_violations": safeguards["path_violations"][-5:],
+        "subagent_timeout_minutes": safeguards["subagent_timeout_minutes"]
+    }
+
+# Initialize known repos on module load
+init_known_repos()
+
 def get_serializable_state(state=None):
     """Return state dict without non-serializable objects (like Popen, set)."""
     if state is None:
@@ -97,6 +238,204 @@ def get_all_projects_summary():
 def get_project_id_from_path(path):
     """Generate a short project ID from path."""
     return os.path.basename(path.rstrip('/')) or 'project'
+
+def reset_daily_usage_if_needed():
+    """Reset daily usage counter if it's a new day."""
+    global usage_stats
+    today = datetime.now().strftime('%Y-%m-%d')
+    if usage_stats["last_reset_daily"] != today:
+        usage_stats["requests_today"] = 0
+        usage_stats["last_reset_daily"] = today
+
+def reset_weekly_usage_if_needed():
+    """Reset weekly usage counter if it's a new week."""
+    global usage_stats
+    # Week starts on Monday
+    today = datetime.now()
+    week_key = today.strftime('%Y-W%W')
+    if usage_stats["last_reset_weekly"] != week_key:
+        usage_stats["requests_this_week"] = 0
+        usage_stats["last_reset_weekly"] = week_key
+
+def track_api_request(tokens_estimate=1000):
+    """Track an API request."""
+    global usage_stats
+    reset_daily_usage_if_needed()
+    reset_weekly_usage_if_needed()
+    usage_stats["requests_today"] += 1
+    usage_stats["requests_this_week"] += 1
+    usage_stats["tokens_estimated"] += tokens_estimate
+    # Add to history
+    usage_stats["history"].append({
+        "timestamp": datetime.now().isoformat(),
+        "requests": 1,
+        "tokens": tokens_estimate
+    })
+    # Keep last 1000 entries
+    if len(usage_stats["history"]) > 1000:
+        usage_stats["history"] = usage_stats["history"][-1000:]
+    socketio.emit('usage_update', get_usage_stats())
+
+def get_usage_stats():
+    """Get current usage stats for UI."""
+    reset_daily_usage_if_needed()
+    reset_weekly_usage_if_needed()
+    return {
+        "requests_today": usage_stats["requests_today"],
+        "requests_this_week": usage_stats["requests_this_week"],
+        "tokens_estimated": usage_stats["tokens_estimated"],
+        "rate_limited": usage_stats["rate_limited"],
+        "rate_limit_until": usage_stats["rate_limit_until"]
+    }
+
+def check_rate_limit(line):
+    """Check if output indicates rate limiting. Returns seconds to wait or None."""
+    global usage_stats
+    # Common rate limit patterns
+    rate_limit_patterns = [
+        r"rate limit|rate-limit|ratelimit",
+        r"too many requests",
+        r"429",
+        r"try again in (\d+)",
+        r"wait (\d+) (second|minute|hour)",
+        r"exceeded.*limit"
+    ]
+    line_lower = line.lower()
+    for pattern in rate_limit_patterns:
+        if re.search(pattern, line_lower):
+            # Try to extract wait time
+            time_match = re.search(r"(\d+)\s*(second|minute|hour|sec|min|hr)", line_lower)
+            if time_match:
+                amount = int(time_match.group(1))
+                unit = time_match.group(2)
+                if 'min' in unit:
+                    amount *= 60
+                elif 'hour' in unit or 'hr' in unit:
+                    amount *= 3600
+                usage_stats["rate_limited"] = True
+                usage_stats["rate_limit_until"] = (datetime.now() + timedelta(seconds=amount)).isoformat()
+                return amount
+            # Default 60 second wait if no time found
+            usage_stats["rate_limited"] = True
+            usage_stats["rate_limit_until"] = (datetime.now() + timedelta(seconds=60)).isoformat()
+            return 60
+    return None
+
+def clear_rate_limit():
+    """Clear rate limit status."""
+    global usage_stats
+    usage_stats["rate_limited"] = False
+    usage_stats["rate_limit_until"] = None
+
+def add_summary_event(event_type, description, project_id=None):
+    """Add an event to the summary data."""
+    global summary_data
+    now = datetime.now()
+    hour_key = now.strftime('%Y-%m-%d-%H')
+    day_key = now.strftime('%Y-%m-%d')
+
+    # Add to events list
+    summary_data["events"].append({
+        "timestamp": now.isoformat(),
+        "type": event_type,
+        "description": description,
+        "project_id": project_id
+    })
+    # Keep last 500 events
+    if len(summary_data["events"]) > 500:
+        summary_data["events"] = summary_data["events"][-500:]
+
+    # Update hourly/daily aggregates
+    if hour_key not in summary_data["hourly"]:
+        summary_data["hourly"][hour_key] = {"prs": 0, "tasks": 0, "files": 0, "requests": 0}
+    if day_key not in summary_data["daily"]:
+        summary_data["daily"][day_key] = {"prs": 0, "tasks": 0, "files": 0, "requests": 0}
+
+    if event_type == "pr_created":
+        summary_data["hourly"][hour_key]["prs"] += 1
+        summary_data["daily"][day_key]["prs"] += 1
+    elif event_type == "task_completed":
+        summary_data["hourly"][hour_key]["tasks"] += 1
+        summary_data["daily"][day_key]["tasks"] += 1
+    elif event_type == "file_changed":
+        summary_data["hourly"][hour_key]["files"] += 1
+        summary_data["daily"][day_key]["files"] += 1
+
+    summary_data["hourly"][hour_key]["requests"] += 1
+    summary_data["daily"][day_key]["requests"] += 1
+
+def get_summary_stats(time_range='today'):
+    """Get summary stats for the UI filtered by time range."""
+    now = datetime.now()
+
+    # Filter events based on time_range
+    if time_range == 'hour':
+        cutoff = now - timedelta(hours=1)
+    elif time_range == 'today':
+        cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif time_range == 'week':
+        cutoff = now - timedelta(days=7)
+    else:
+        cutoff = now - timedelta(days=30)  # Default to month
+
+    # Filter events by timestamp
+    filtered_events = []
+    for event in summary_data["events"]:
+        try:
+            event_time = datetime.fromisoformat(event.get("timestamp", ""))
+            if event_time >= cutoff:
+                filtered_events.append(event)
+        except (ValueError, TypeError):
+            # Include events without valid timestamps
+            filtered_events.append(event)
+
+    return {
+        "hourly": summary_data["hourly"],
+        "daily": summary_data["daily"],
+        "recent_events": filtered_events[-50:],  # Last 50 filtered events
+        "time_range": time_range
+    }
+
+def add_to_queue(message, project_id=None):
+    """Add a message to the queue."""
+    global message_queue, queue_counter
+    queue_counter += 1
+    item = {
+        "id": queue_counter,
+        "message": message,
+        "project_id": project_id,
+        "status": "pending",
+        "created_at": datetime.now().isoformat()
+    }
+    message_queue.append(item)
+    socketio.emit('queue_update', get_queue_status())
+    return item
+
+def get_queue_status():
+    """Get queue status for UI."""
+    return {
+        "items": message_queue,
+        "pending_count": len([m for m in message_queue if m["status"] == "pending"]),
+        "processing_count": len([m for m in message_queue if m["status"] == "processing"])
+    }
+
+def process_next_queue_item(project_id):
+    """Get next pending queue item for a project."""
+    for item in message_queue:
+        if item["status"] == "pending" and (item["project_id"] is None or item["project_id"] == project_id):
+            item["status"] = "processing"
+            socketio.emit('queue_update', get_queue_status())
+            return item
+    return None
+
+def complete_queue_item(item_id, success=True):
+    """Mark a queue item as complete."""
+    for item in message_queue:
+        if item["id"] == item_id:
+            item["status"] = "completed" if success else "failed"
+            item["completed_at"] = datetime.now().isoformat()
+            socketio.emit('queue_update', get_queue_status())
+            return
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -1838,6 +2177,69 @@ def handle_remove_project(data):
         del projects_state[project_id]
         emit('projects_update', {'projects': get_all_projects_summary()})
 
+# ============================================
+# Usage Stats Socket Handlers
+# ============================================
+@socketio.on('get_usage')
+def handle_get_usage():
+    """Send current usage stats to client."""
+    emit('usage_update', get_usage_stats())
+
+@socketio.on('clear_rate_limit')
+def handle_clear_rate_limit():
+    """Clear rate limit status and emit update."""
+    clear_rate_limit()
+    emit('usage_update', get_usage_stats())
+
+# ============================================
+# Message Queue Socket Handlers
+# ============================================
+@socketio.on('get_queue')
+def handle_get_queue():
+    """Send current queue to client."""
+    emit('queue_update', {'queue': get_queue_status()})
+
+@socketio.on('add_to_queue')
+def handle_add_to_queue(data):
+    """Add a message to the queue."""
+    project_id = data.get('project_id')
+    message = data.get('message', '').strip()
+
+    if not project_id or not message:
+        return
+
+    item = add_to_queue(message, project_id)
+    # Broadcast queue update to all clients
+    socketio.emit('queue_update', {'queue': get_queue_status()})
+    socketio.emit('log_line', {'line': f'[Queue] Added task for {project_id}: {message[:50]}...'})
+
+# ============================================
+# Summary Socket Handlers
+# ============================================
+@socketio.on('get_summary')
+def handle_get_summary(data=None):
+    """Get summary stats for the requested time range."""
+    time_range = (data or {}).get('time_range', 'today')
+    stats = get_summary_stats(time_range)
+    emit('summary_update', stats)
+
+# ============================================
+# Safeguard Socket Handlers
+# ============================================
+@socketio.on('get_safeguards')
+def handle_get_safeguards():
+    """Get current safeguard status."""
+    emit('safeguard_status', get_safeguard_status())
+
+@socketio.on('clear_safeguard_alerts')
+def handle_clear_safeguard_alerts():
+    """Clear safeguard alerts."""
+    global safeguards
+    safeguards["alerts"] = []
+    safeguards["path_violations"] = []
+    emit('safeguard_status', get_safeguard_status())
+    socketio.emit('log_line', {'line': '[SAFEGUARD] Alerts cleared'})
+
 @socketio.on('start_orchestra')
 def handle_start(data):
     global orchestra_state, active_project_id
@@ -1981,6 +2383,17 @@ def handle_start(data):
                     state['log_lines'] = state['log_lines'][-500:]
                 socketio.emit('log_line', {'line': log_text, 'project_id': pid})
 
+                # Check for rate limit and track usage
+                wait_time = check_rate_limit(line_text)
+                if wait_time:
+                    socketio.emit('log_line', {'line': f'[{pid}] ⚠️ Rate limit detected, auto-resuming in {wait_time}s'})
+                    socketio.emit('usage_update', get_usage_stats())
+
+                # Check for cross-repo activity (safeguard)
+                project_path = state.get('project_path', '')
+                if project_path:
+                    check_cross_repo_activity(line_text, project_path, pid)
+
                 # Parse stage transitions
                 if '[STAGE 1]' in line_text or 'IMPLEMENTER' in line_text.upper():
                     state["current_stage"] = "implement"
@@ -1999,6 +2412,8 @@ def handle_start(data):
                 elif 'Cycle' in line_text and 'complete' in line_text:
                     state["cycles_completed"] += 1
                     state["current_stage"] = None  # Reset for next cycle
+                    # Add to summary
+                    add_summary_event('cycle', f'Cycle {state["cycles_completed"]} completed', pid)
 
                 # Parse activity from stream-json events and log output
                 try:
@@ -2010,10 +2425,16 @@ def handle_start(data):
                             tool_name = event.get('name', event.get('tool', 'unknown'))
                             state["tools_used"] += 1
                             state["last_tool"] = tool_name
+                            # Track API request
+                            track_api_request()
 
                             # Track file changes
                             if tool_name in ('Edit', 'Write', 'NotebookEdit'):
                                 file_path = event.get('input', {}).get('file_path', '')
+                                # Check for path traversal (file outside project)
+                                project_path = state.get('project_path', '')
+                                if file_path and project_path:
+                                    check_path_traversal(file_path, project_path, pid)
                                 if file_path and file_path not in state["files_changed_set"]:
                                     state["files_changed_set"].add(file_path)
                                     state["files_changed"] = len(state["files_changed_set"])
@@ -2028,6 +2449,8 @@ def handle_start(data):
                                     }
                                     state["activity_log"].append(entry)
                                     socketio.emit('activity_log_entry', entry)
+                                    # Add to summary
+                                    add_summary_event('file', f'Modified {file_path.split("/")[-1]}', pid)
 
                             # Track sub-agent invocations
                             elif tool_name == 'Task':
