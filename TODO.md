@@ -3,7 +3,7 @@
 ## High Priority 🔴
 
 ### Error Handling & Robustness
-- [ ] Add comprehensive process cleanup mechanism to prevent orphaned Claude processes
+- [x] Add comprehensive process cleanup mechanism to prevent orphaned Claude processes
 - [ ] Implement state file validation and corruption recovery
 - [ ] Add circuit breaker pattern for repeated API/CLI failures
 - [ ] Implement graceful shutdown handler for daemon mode
@@ -81,6 +81,7 @@
 - [x] Fix timeout loop issues with smarter task selection
 - [x] Add directory browser to dashboard
 - [x] Support multiple pending project tabs
+- [x] Add comprehensive process cleanup mechanism to prevent orphaned Claude processes
 
 ---
 

@@ -9,14 +9,29 @@ import re
 import subprocess
 import threading
 import time
+import atexit
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, render_template_string, jsonify, request
 from flask_socketio import SocketIO, emit
+from process_manager import get_process_manager
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'claude-orchestra-secret'
 socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Initialize process manager for cleanup
+process_manager = get_process_manager()
+
+# Register cleanup on exit
+def cleanup_on_exit():
+    """Clean up all processes when dashboard exits."""
+    process_manager.stop_all_processes(timeout=5)
+    orphan_count = process_manager.detect_and_kill_orphans()
+    if orphan_count > 0:
+        print(f"Cleaned up {orphan_count} orphaned process(es) on exit")
+
+atexit.register(cleanup_on_exit)
 
 # Default state template for a project
 def create_project_state():
@@ -1800,8 +1815,14 @@ def handle_stop_project(data):
     if project_id and project_id in projects_state:
         state = projects_state[project_id]
         state["running"] = False
-        if state.get("process"):
+
+        # Use process manager to stop gracefully
+        success = process_manager.stop_process(project_id, timeout=10)
+
+        if not success and state.get("process"):
+            # Fallback to manual termination if process manager fails
             state["process"].terminate()
+
         emit('state_update', get_serializable_state(state))
         emit('projects_update', {'projects': get_all_projects_summary()})
         emit('log_line', {'line': f'Stopping orchestra for {project_id}...'})
@@ -1811,8 +1832,9 @@ def handle_remove_project(data):
     project_id = data.get('project_id')
     if project_id and project_id in projects_state:
         state = projects_state[project_id]
-        if state.get("running") and state.get("process"):
-            state["process"].terminate()
+        if state.get("running"):
+            # Use process manager to stop gracefully
+            process_manager.stop_process(project_id, timeout=10)
         del projects_state[project_id]
         emit('projects_update', {'projects': get_all_projects_summary()})
 
@@ -1922,6 +1944,9 @@ def handle_start(data):
             text=True,
             bufsize=1  # Line buffered for real-time output
         )
+
+        # Track the process for automatic cleanup
+        process_manager.track_process(pid, state["process"])
 
         # Use select for non-blocking reads to allow stop button to work
         import select
@@ -2082,9 +2107,39 @@ def handle_start(data):
 
         state["running"] = False
         state["current_stage"] = None
+
+        # Untrack the process when it completes
+        process_manager.untrack_process(pid)
+
         socketio.emit('state_update', get_serializable_state(state))
         socketio.emit('projects_update', {'projects': get_all_projects_summary()})
         socketio.emit('log_line', {'line': f'[{pid}] Orchestra stopped'})
+
+    def cleanup_orphans():
+        """Periodically check for and clean up orphaned Claude processes."""
+        while state["running"]:
+            try:
+                # Wait 60 seconds before checking (don't spam)
+                for _ in range(60):
+                    if not state["running"]:
+                        return
+                    time.sleep(1)
+                
+                # Detect and kill orphans in this project's directory
+                orphan_count = process_manager.detect_and_kill_orphans(project_path)
+                if orphan_count > 0:
+                    log_text = f'[{pid}] ⚠️  Cleaned up {orphan_count} orphaned Claude process(es)'
+                    state['log_lines'].append(log_text)
+                    if len(state['log_lines']) > 500:
+                        state['log_lines'] = state['log_lines'][-500:]
+                    socketio.emit('log_line', {'line': log_text, 'project_id': pid})
+            except Exception as e:
+                logger.error(f"Error in orphan cleanup thread: {e}")
+    
+    # Start orphan cleanup thread alongside the main orchestra thread
+    cleanup_thread = threading.Thread(target=cleanup_orphans)
+    cleanup_thread.daemon = True  # Dies when main thread exits
+    cleanup_thread.start()
 
     thread = threading.Thread(target=run_orchestra)
     thread.daemon = True
@@ -2098,8 +2153,15 @@ def handle_start(data):
 def handle_stop():
     global orchestra_state
     orchestra_state["running"] = False
-    if orchestra_state.get("process"):
+
+    # Try to stop via process manager if we have a project_id
+    project_id = orchestra_state.get("project_id")
+    if project_id:
+        process_manager.stop_process(project_id, timeout=10)
+    elif orchestra_state.get("process"):
+        # Fallback for legacy single-project mode
         orchestra_state["process"].terminate()
+
     emit('state_update', get_serializable_state())
     emit('log_line', {'line': 'Stopping orchestra...'})
 

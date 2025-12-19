@@ -22,11 +22,14 @@ import argparse
 import json
 import logging
 import time
+import atexit
+import signal
 from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 from datetime import datetime
+from process_manager import get_process_manager
 
 # Configure logging with immediate flush for real-time streaming
 class FlushingStreamHandler(logging.StreamHandler):
@@ -43,6 +46,20 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Initialize process manager for cleanup
+process_manager = get_process_manager()
+
+# Register cleanup on exit
+def cleanup_on_exit():
+    """Clean up all spawned processes when orchestra exits."""
+    logger.info("Orchestra exiting, cleaning up processes...")
+    process_manager.stop_all_processes(timeout=5)
+    orphan_count = process_manager.detect_and_kill_orphans()
+    if orphan_count > 0:
+        logger.info(f"Cleaned up {orphan_count} orphaned process(es) on exit")
+
+atexit.register(cleanup_on_exit)
 
 
 class AgentRole(Enum):
@@ -96,6 +113,9 @@ class ClaudeOrchestra:
         self.task_queue = task_queue or []
         self.current_task_index = 0  # Track which queued task we're on
         self.use_subagents = use_subagents
+        
+        # Initialize ProcessManager for subprocess lifecycle management
+        self.process_manager = get_process_manager()
 
         # Validate project path
         if not self.project_path.exists():
@@ -215,11 +235,13 @@ PROACTIVELY use sub-agents to ensure fixes are correct!
         """Run Claude with real-time streaming using stream-json format."""
         import threading
         import queue
+        import uuid
 
         output_queue = queue.Queue()
         full_output = []
         result_text = ""
         start_time = time.time()
+        process_id = f"claude-stream-{uuid.uuid4().hex[:8]}"
 
         def timestamp():
             """Get current timestamp."""
@@ -313,6 +335,9 @@ PROACTIVELY use sub-agents to ensure fixes are correct!
                 bufsize=1
             )
 
+            # Track the process with ProcessManager for automatic cleanup
+            self.process_manager.track_process(process_id, process)
+
             log_print("=" * 60)
             log_print("CLAUDE WORKING (live stream)")
             log_print("=" * 60)
@@ -330,9 +355,10 @@ PROACTIVELY use sub-agents to ensure fixes are correct!
             while True:
                 elapsed = time.time() - start_time
                 if elapsed > self.timeout:
-                    process.kill()
-                    process.wait()
-                    logger.error(f"Claude execution timed out after {self.timeout}s")
+                    # Use ProcessManager for graceful shutdown with timeout
+                    logger.warning(f"Claude execution timeout ({self.timeout}s), stopping process...")
+                    if not self.process_manager.stop_process(process_id, timeout=10):
+                        logger.error("Failed to stop process gracefully")
                     return AgentResult(
                         role=AgentRole.IMPLEMENTER,
                         success=False,
@@ -379,6 +405,9 @@ PROACTIVELY use sub-agents to ensure fixes are correct!
             else:
                 logger.error(f"Claude execution failed with code {process.returncode}")
 
+            # Untrack process after completion
+            self.process_manager.untrack_process(process_id)
+
             return AgentResult(
                 role=AgentRole.IMPLEMENTER,
                 success=success,
@@ -394,42 +423,67 @@ PROACTIVELY use sub-agents to ensure fixes are correct!
                 output="",
                 error="Claude CLI not found. Please install it first."
             )
-
-    def _run_claude_captured(self, cmd: list, cwd: Path) -> AgentResult:
-        """Run Claude with captured output (no streaming)."""
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                timeout=self.timeout
-            )
-
-            success = result.returncode == 0
-            output = result.stdout
-            error = result.stderr if result.returncode != 0 else None
-
-            if success:
-                logger.info("Claude execution completed successfully")
-            else:
-                logger.error(f"Claude execution failed: {error}")
-
-            return AgentResult(
-                role=AgentRole.IMPLEMENTER,
-                success=success,
-                output=output,
-                error=error
-            )
-
-        except subprocess.TimeoutExpired:
-            logger.error(f"Claude execution timed out after {self.timeout}s")
+        except Exception as e:
+            # Ensure cleanup on any unexpected error
+            logger.error(f"Unexpected error in _run_claude_streaming: {e}")
+            self.process_manager.untrack_process(process_id)
             return AgentResult(
                 role=AgentRole.IMPLEMENTER,
                 success=False,
-                output="",
-                error=f"Execution timed out after {self.timeout} seconds"
+                output=result_text,
+                error=str(e)
             )
+
+    def _run_claude_captured(self, cmd: list, cwd: Path) -> AgentResult:
+        """Run Claude with captured output (no streaming)."""
+        import uuid
+        
+        process_id = f"claude-captured-{uuid.uuid4().hex[:8]}"
+        
+        try:
+            # Use Popen instead of run() for ProcessManager integration
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Track the process
+            self.process_manager.track_process(process_id, process)
+            
+            try:
+                # Wait for completion with timeout
+                stdout, stderr = process.communicate(timeout=self.timeout)
+                success = process.returncode == 0
+                
+                if success:
+                    logger.info("Claude execution completed successfully")
+                else:
+                    logger.error(f"Claude execution failed: {stderr}")
+                
+                # Untrack after completion
+                self.process_manager.untrack_process(process_id)
+                
+                return AgentResult(
+                    role=AgentRole.IMPLEMENTER,
+                    success=success,
+                    output=stdout,
+                    error=stderr if not success else None
+                )
+                
+            except subprocess.TimeoutExpired:
+                logger.error(f"Claude execution timed out after {self.timeout}s")
+                # Use ProcessManager for graceful shutdown
+                self.process_manager.stop_process(process_id, timeout=10)
+                return AgentResult(
+                    role=AgentRole.IMPLEMENTER,
+                    success=False,
+                    output="",
+                    error=f"Execution timed out after {self.timeout} seconds"
+                )
+                
         except FileNotFoundError:
             logger.error("Claude CLI not found. Is it installed?")
             return AgentResult(
@@ -437,6 +491,15 @@ PROACTIVELY use sub-agents to ensure fixes are correct!
                 success=False,
                 output="",
                 error="Claude CLI not found. Please install it first."
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error in _run_claude_captured: {e}")
+            self.process_manager.untrack_process(process_id)
+            return AgentResult(
+                role=AgentRole.IMPLEMENTER,
+                success=False,
+                output="",
+                error=str(e)
             )
 
     def run_implementer(self, task_description: Optional[str] = None) -> AgentResult:
