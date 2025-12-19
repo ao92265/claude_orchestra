@@ -2995,9 +2995,9 @@ def handle_start(data):
                     socketio.emit('usage_update', get_usage_stats())
 
                 # Check for cross-repo activity (safeguard)
-                project_path = state.get('project_path', '')
-                if project_path:
-                    check_cross_repo_activity(line_text, project_path, pid)
+                current_project_path = state.get('project_path', '')
+                if current_project_path:
+                    check_cross_repo_activity(line_text, current_project_path, pid)
 
                 # Parse stage transitions
                 if '[STAGE 1]' in line_text or 'IMPLEMENTER' in line_text.upper():
@@ -3037,9 +3037,9 @@ def handle_start(data):
                             if tool_name in ('Edit', 'Write', 'NotebookEdit'):
                                 file_path = event.get('input', {}).get('file_path', '')
                                 # Check for path traversal (file outside project)
-                                project_path = state.get('project_path', '')
-                                if file_path and project_path:
-                                    check_path_traversal(file_path, project_path, pid)
+                                current_project_path = state.get('project_path', '')
+                                if file_path and current_project_path:
+                                    check_path_traversal(file_path, current_project_path, pid)
                                 if file_path and file_path not in state["files_changed_set"]:
                                     state["files_changed_set"].add(file_path)
                                     state["files_changed"] = len(state["files_changed_set"])
@@ -3145,22 +3145,23 @@ def handle_start(data):
 
     def cleanup_orphans():
         """Periodically check for and clean up orphaned Claude processes."""
-        while state["running"]:
+        # Use project_state and project_id from the enclosing socket handler scope
+        while project_state["running"]:
             try:
                 # Wait 60 seconds before checking (don't spam)
                 for _ in range(60):
-                    if not state["running"]:
+                    if not project_state["running"]:
                         return
                     time.sleep(1)
-                
+
                 # Detect and kill orphans in this project's directory
                 orphan_count = process_manager.detect_and_kill_orphans(project_path)
                 if orphan_count > 0:
-                    log_text = f'[{pid}] ⚠️  Cleaned up {orphan_count} orphaned Claude process(es)'
-                    state['log_lines'].append(log_text)
-                    if len(state['log_lines']) > 500:
-                        state['log_lines'] = state['log_lines'][-500:]
-                    socketio.emit('log_line', {'line': log_text, 'project_id': pid})
+                    log_text = f'[{project_id}] ⚠️  Cleaned up {orphan_count} orphaned Claude process(es)'
+                    project_state['log_lines'].append(log_text)
+                    if len(project_state['log_lines']) > 500:
+                        project_state['log_lines'] = project_state['log_lines'][-500:]
+                    socketio.emit('log_line', {'line': log_text, 'project_id': project_id})
             except Exception as e:
                 logger.error(f"Error in orphan cleanup thread: {e}")
     
