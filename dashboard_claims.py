@@ -22,12 +22,16 @@ Integration:
 """
 
 import asyncio
+import json
 import os
 import ssl
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any
 from pathlib import Path
+
+# Config file for persistence
+CONFIG_FILE = Path.home() / '.claude_orchestra_multiuser.json'
 
 # Try to use certifi for SSL certificates (needed on macOS)
 try:
@@ -107,6 +111,9 @@ def register_claims_handlers(socketio, app, coordinator=None, config=None):
             _setup_state['repo_name']
         )
 
+        # Save to persistent file
+        _save_config_to_file()
+
         emit('multiuser_config', _get_safe_config())
         emit('config_saved', {'success': True})
         logger.info(f"Multi-user config saved for {_setup_state['repo_owner']}/{_setup_state['repo_name']}")
@@ -126,6 +133,7 @@ def register_claims_handlers(socketio, app, coordinator=None, config=None):
             if result['success']:
                 _setup_state['connection_tested'] = True
                 _setup_state['github_username'] = result.get('username')
+                _save_config_to_file()  # Persist username
             emit('connection_result', result)
         except Exception as e:
             emit('connection_result', {'success': False, 'error': str(e)})
@@ -153,6 +161,7 @@ def register_claims_handlers(socketio, app, coordinator=None, config=None):
             result = _sync_todos_sync(project_path)
             if result['success']:
                 _setup_state['last_sync'] = datetime.now(timezone.utc).isoformat()
+                _save_config_to_file()  # Persist last_sync and project_path
             emit('sync_result', result)
             emit('multiuser_config', _get_safe_config())
         except Exception as e:
@@ -272,21 +281,83 @@ def _get_repo_from_git_remote(project_path: str) -> Optional[str]:
         return None
 
 
-def _load_config_from_env():
-    """Load configuration from environment variables."""
+def _save_config_to_file():
+    """Save configuration to persistent file."""
+    try:
+        config_data = {
+            'github_token': _setup_state['github_token'],
+            'repo_owner': _setup_state['repo_owner'],
+            'repo_name': _setup_state['repo_name'],
+            'claim_timeout': _setup_state['claim_timeout'],
+            'heartbeat_interval': _setup_state['heartbeat_interval'],
+            'last_sync': _setup_state['last_sync'],
+            'github_username': _setup_state['github_username'],
+            'project_path': _setup_state['project_path']
+        }
+        CONFIG_FILE.write_text(json.dumps(config_data, indent=2))
+        logger.info(f"Config saved to {CONFIG_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to save config: {e}")
+
+
+def _load_config_from_file():
+    """Load configuration from persistent file."""
     global _setup_state
 
-    _setup_state['github_token'] = os.getenv('GITHUB_TOKEN', '')
+    if not CONFIG_FILE.exists():
+        return False
+
+    try:
+        config_data = json.loads(CONFIG_FILE.read_text())
+        _setup_state['github_token'] = config_data.get('github_token', '')
+        _setup_state['repo_owner'] = config_data.get('repo_owner', '')
+        _setup_state['repo_name'] = config_data.get('repo_name', '')
+        _setup_state['claim_timeout'] = config_data.get('claim_timeout', 1800)
+        _setup_state['heartbeat_interval'] = config_data.get('heartbeat_interval', 300)
+        _setup_state['last_sync'] = config_data.get('last_sync')
+        _setup_state['github_username'] = config_data.get('github_username')
+        _setup_state['project_path'] = config_data.get('project_path')
+
+        _setup_state['configured'] = bool(
+            _setup_state['github_token'] and
+            _setup_state['repo_owner'] and
+            _setup_state['repo_name']
+        )
+        logger.info(f"Config loaded from {CONFIG_FILE}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to load config from file: {e}")
+        return False
+
+
+def _load_config_from_env():
+    """Load configuration from file first, then environment variables as fallback."""
+    global _setup_state
+
+    # Try loading from file first
+    if _load_config_from_file():
+        # File loaded successfully, but env vars can override
+        pass
+
+    # Environment variables override file config (if set)
+    env_token = os.getenv('GITHUB_TOKEN', '')
+    if env_token:
+        _setup_state['github_token'] = env_token
 
     repo = os.getenv('GITHUB_REPO', '')
     if '/' in repo:
         _setup_state['repo_owner'], _setup_state['repo_name'] = repo.split('/', 1)
-    else:
+    elif not _setup_state['repo_owner']:
         _setup_state['repo_owner'] = os.getenv('GITHUB_REPO_OWNER', '')
         _setup_state['repo_name'] = os.getenv('GITHUB_REPO_NAME', '')
 
-    _setup_state['claim_timeout'] = int(os.getenv('ORCHESTRA_CLAIM_TIMEOUT', '1800'))
-    _setup_state['heartbeat_interval'] = int(os.getenv('ORCHESTRA_HEARTBEAT_INTERVAL', '300'))
+    env_timeout = os.getenv('ORCHESTRA_CLAIM_TIMEOUT')
+    if env_timeout:
+        _setup_state['claim_timeout'] = int(env_timeout)
+
+    env_heartbeat = os.getenv('ORCHESTRA_HEARTBEAT_INTERVAL')
+    if env_heartbeat:
+        _setup_state['heartbeat_interval'] = int(env_heartbeat)
 
     _setup_state['configured'] = bool(
         _setup_state['github_token'] and
@@ -346,8 +417,10 @@ def _sync_todos_sync(project_path: str) -> Dict:
     """Sync TODOs synchronously with timeout."""
     try:
         from task_coordinator import TaskCoordinator
+        import traceback
 
         async def sync():
+            logger.info(f"Starting sync for project: {project_path}")
             coordinator = TaskCoordinator(
                 repo_owner=_setup_state['repo_owner'],
                 repo_name=_setup_state['repo_name'],
@@ -356,8 +429,10 @@ def _sync_todos_sync(project_path: str) -> Dict:
                 claim_timeout=_setup_state['claim_timeout']
             )
             await coordinator.setup()
+            logger.info("Coordinator setup complete, starting sync...")
             result = await coordinator.sync_todos_to_issues()
             await coordinator.close()
+            logger.info(f"Sync finished: {result.created} created, {result.unchanged} unchanged, {len(result.errors)} errors")
             return {
                 'success': True,
                 'created': result.created,
@@ -369,20 +444,26 @@ def _sync_todos_sync(project_path: str) -> Dict:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            # Add 5 minute timeout to prevent infinite hangs
+            # 15 minute timeout for large TODO files
             future = asyncio.ensure_future(sync(), loop=loop)
             return loop.run_until_complete(
-                asyncio.wait_for(future, timeout=300.0)
+                asyncio.wait_for(future, timeout=900.0)
             )
         except asyncio.TimeoutError:
-            return {'success': False, 'error': 'Sync timed out after 5 minutes. Try syncing fewer tasks.'}
+            logger.error("Sync timed out after 15 minutes")
+            return {'success': False, 'error': 'Sync timed out after 15 minutes. Try syncing fewer tasks.'}
+        except Exception as e:
+            logger.error(f"Sync async error: {e}\n{traceback.format_exc()}")
+            return {'success': False, 'error': str(e)}
         finally:
             loop.close()
 
-    except ImportError:
+    except ImportError as e:
+        logger.error(f"Import error: {e}")
         return {'success': False, 'error': 'task_coordinator module not found'}
     except Exception as e:
-        logger.error(f"Sync error: {e}")
+        import traceback
+        logger.error(f"Sync error: {e}\n{traceback.format_exc()}")
         return {'success': False, 'error': str(e)}
 
 

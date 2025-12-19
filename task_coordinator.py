@@ -367,9 +367,14 @@ class GitHubClient:
         labels: Optional[List[str]] = None,
         state: str = "open",
         assignee: Optional[str] = None,
-        per_page: int = 30
+        per_page: int = 100,
+        paginate_all: bool = False
     ) -> List[Dict]:
-        """List issues with optional filters."""
+        """List issues with optional filters.
+
+        Args:
+            paginate_all: If True, fetches ALL pages of results. Default False for backwards compat.
+        """
         params = {
             "state": state,
             "per_page": per_page
@@ -379,14 +384,32 @@ class GitHubClient:
         if assignee is not None:
             params["assignee"] = assignee if assignee else "none"
 
-        status, data = await self._request(
-            "GET",
-            f"/repos/{self.owner}/{self.repo}/issues",
-            params=params
-        )
-        if status != 200:
-            raise GitHubAPIError(f"Failed to list issues: {data}", status)
-        return data
+        all_issues = []
+        page = 1
+
+        while True:
+            params["page"] = page
+            status, data = await self._request(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/issues",
+                params=params
+            )
+            if status != 200:
+                raise GitHubAPIError(f"Failed to list issues: {data}", status)
+
+            all_issues.extend(data)
+
+            # If not paginating all, or got fewer results than per_page, we're done
+            if not paginate_all or len(data) < per_page:
+                break
+
+            page += 1
+            # Safety limit to prevent infinite loops
+            if page > 50:
+                logger.warning("Hit pagination limit (5000 issues)")
+                break
+
+        return all_issues
 
     async def create_issue(
         self,
@@ -599,12 +622,14 @@ class TaskCoordinator:
             logger.info("No tasks found in TODO files")
             return result
 
-        # Get existing orchestra issues
+        # Get existing orchestra issues (fetch ALL pages to avoid duplicates)
         existing_issues = await self.github.list_issues(
             labels=["orchestra-task"],
             state="all",
-            per_page=100
+            per_page=100,
+            paginate_all=True
         )
+        logger.info(f"Found {len(existing_issues)} existing orchestra issues")
 
         # Build map of task_id to issue
         existing_by_task_id = {}
@@ -614,10 +639,11 @@ class TaskCoordinator:
                 existing_by_task_id[task_id] = issue
 
         # Sync each task
-        for task_title, task_body, task_id, source_file, priority in tasks:
+        total_tasks = len(tasks)
+        for idx, (task_title, task_body, task_id, source_file, priority) in enumerate(tasks):
             try:
                 if task_id in existing_by_task_id:
-                    # Check if update needed
+                    # Skip - already exists with same title
                     existing = existing_by_task_id[task_id]
                     if existing["title"] != task_title:
                         await self.github.update_issue(
@@ -628,6 +654,9 @@ class TaskCoordinator:
                         logger.info(f"Updated issue #{existing['number']}: {task_title}")
                     else:
                         result.unchanged += 1
+                        # Log progress every 20 skipped items
+                        if result.unchanged % 20 == 0:
+                            logger.info(f"Progress: skipped {result.unchanged} existing, {result.created} created ({idx+1}/{total_tasks})")
                 else:
                     # Create new issue with correct priority label
                     full_body = self._format_issue_body(task_body, task_id, source_file)
@@ -637,10 +666,11 @@ class TaskCoordinator:
                         labels=["orchestra-task", "status:available", f"priority:{priority}"]
                     )
                     result.created += 1
-                    logger.info(f"Created issue [{priority}]: {task_title}")
+                    logger.info(f"[{idx+1}/{total_tasks}] Created [{priority}]: {task_title[:50]}...")
 
-                    # Small delay to avoid rate limits (0.1s = 600/min, well under limit)
-                    await asyncio.sleep(0.1)
+                    # 2 second delay to avoid GitHub secondary rate limits
+                    # Secondary limits are stricter than primary (content creation spam prevention)
+                    await asyncio.sleep(2.0)
 
             except Exception as e:
                 error_msg = f"Error syncing task '{task_title}': {e}"
@@ -672,7 +702,9 @@ class TaskCoordinator:
             # Detect priority section headers
             line_lower = line.lower()
             if line.startswith('#'):
-                if 'high' in line_lower and 'priority' in line_lower:
+                if 'highest' in line_lower and 'priority' in line_lower:
+                    current_priority = "highest"
+                elif 'high' in line_lower and 'priority' in line_lower:
                     current_priority = "high"
                 elif 'medium' in line_lower and 'priority' in line_lower:
                     current_priority = "medium"
@@ -680,6 +712,8 @@ class TaskCoordinator:
                     current_priority = "low"
                 elif 'completed' in line_lower or 'done' in line_lower:
                     current_priority = "skip"  # Skip completed section
+                elif 'detailed' in line_lower or 'documentation' in line_lower:
+                    current_priority = "skip"  # Skip detailed docs section
                 i += 1
                 continue
 
