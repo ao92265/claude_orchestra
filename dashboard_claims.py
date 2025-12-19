@@ -23,10 +23,18 @@ Integration:
 
 import asyncio
 import os
+import ssl
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any
 from pathlib import Path
+
+# Try to use certifi for SSL certificates (needed on macOS)
+try:
+    import certifi
+    SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    SSL_CONTEXT = ssl.create_default_context()
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +314,9 @@ def _test_github_connection_sync() -> Dict:
     import aiohttp
 
     async def test():
-        async with aiohttp.ClientSession() as session:
+        # Use TCPConnector with SSL context to fix macOS certificate issues
+        connector = aiohttp.TCPConnector(ssl=SSL_CONTEXT)
+        async with aiohttp.ClientSession(connector=connector) as session:
             headers = {
                 'Authorization': f"token {_setup_state['github_token']}",
                 'Accept': 'application/vnd.github.v3+json'
