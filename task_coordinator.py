@@ -614,7 +614,7 @@ class TaskCoordinator:
                 existing_by_task_id[task_id] = issue
 
         # Sync each task
-        for task_title, task_body, task_id, source_file in tasks:
+        for task_title, task_body, task_id, source_file, priority in tasks:
             try:
                 if task_id in existing_by_task_id:
                     # Check if update needed
@@ -629,15 +629,15 @@ class TaskCoordinator:
                     else:
                         result.unchanged += 1
                 else:
-                    # Create new issue
+                    # Create new issue with correct priority label
                     full_body = self._format_issue_body(task_body, task_id, source_file)
                     await self.github.create_issue(
                         title=task_title,
                         body=full_body,
-                        labels=["orchestra-task", "status:available", "priority:medium"]
+                        labels=["orchestra-task", "status:available", f"priority:{priority}"]
                     )
                     result.created += 1
-                    logger.info(f"Created issue: {task_title}")
+                    logger.info(f"Created issue [{priority}]: {task_title}")
 
                     # Small delay to avoid rate limits
                     await asyncio.sleep(0.5)
@@ -651,35 +651,68 @@ class TaskCoordinator:
                    f"{result.unchanged} unchanged, {len(result.errors)} errors")
         return result
 
-    def _parse_todo_file(self, file_path: Path) -> List[Tuple[str, str, str, str]]:
+    def _parse_todo_file(self, file_path: Path) -> List[Tuple[str, str, str, str, str]]:
         """
         Parse a TODO.md file into tasks.
 
-        Returns list of (title, body, task_id, source_file) tuples.
+        Returns list of (title, body, task_id, source_file, priority) tuples.
+        Priority is detected from section headers like "## High Priority".
         """
         tasks = []
         content = file_path.read_text()
 
-        # Match markdown task items: - [ ] Task description
-        # Also capture any sub-items or description that follows
-        pattern = r'^- \[ \] (.+?)(?=\n- \[|\n## |\n# |\Z)'
-        matches = re.findall(pattern, content, re.MULTILINE | re.DOTALL)
+        # Track current priority based on section headers
+        current_priority = "medium"  # Default priority
 
-        for match in matches:
-            lines = match.strip().split('\n')
-            title = lines[0].strip()
+        lines = content.split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i]
 
-            # Skip if already marked done or is a sub-task marker
-            if title.startswith('[x]') or title.startswith('[ ]'):
+            # Detect priority section headers
+            line_lower = line.lower()
+            if line.startswith('#'):
+                if 'high' in line_lower and 'priority' in line_lower:
+                    current_priority = "high"
+                elif 'medium' in line_lower and 'priority' in line_lower:
+                    current_priority = "medium"
+                elif 'low' in line_lower and 'priority' in line_lower:
+                    current_priority = "low"
+                elif 'completed' in line_lower or 'done' in line_lower:
+                    current_priority = "skip"  # Skip completed section
+                i += 1
                 continue
 
-            # Body is remaining lines (sub-tasks, description)
-            body = '\n'.join(lines[1:]).strip() if len(lines) > 1 else ""
+            # Skip if in completed section
+            if current_priority == "skip":
+                i += 1
+                continue
 
-            # Generate task ID from title
-            task_id = f"task-{hashlib.sha256(title.encode()).hexdigest()[:8]}"
+            # Match task items: - [ ] Task description
+            match = re.match(r'^- \[ \] (.+)$', line)
+            if match:
+                title = match.group(1).strip()
 
-            tasks.append((title, body, task_id, str(file_path.relative_to(self.project_path))))
+                # Collect body (sub-items, description) until next task or section
+                body_lines = []
+                j = i + 1
+                while j < len(lines):
+                    next_line = lines[j]
+                    # Stop at next task, section header, or empty line followed by non-indented content
+                    if re.match(r'^- \[[ x]\]', next_line) or next_line.startswith('#'):
+                        break
+                    if next_line.strip():
+                        body_lines.append(next_line)
+                    j += 1
+
+                body = '\n'.join(body_lines).strip()
+
+                # Generate task ID from title
+                task_id = f"task-{hashlib.sha256(title.encode()).hexdigest()[:8]}"
+
+                tasks.append((title, body, task_id, str(file_path.relative_to(self.project_path)), current_priority))
+
+            i += 1
 
         return tasks
 
