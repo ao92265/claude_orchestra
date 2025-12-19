@@ -205,16 +205,24 @@ class MultiUserOrchestra:
         try:
             # Run implementer with the claimed task
             # Override branch naming to use our format
-            task_prompt = f"""CLAIMED TASK (from GitHub Issue #{claim.issue_number}):
+            task_prompt = f"""MULTI-USER MODE - CLAIMED TASK FROM GITHUB ISSUE #{claim.issue_number}
+
+=== YOUR ASSIGNED TASK ===
 Title: {claim.task.title}
 
+Description:
 {claim.task.description}
 
-IMPORTANT INSTRUCTIONS:
-1. Create branch: {claim.branch_name}
-2. This task was claimed from the shared task queue
-3. Other agents may be working on other tasks - coordinate via commits
-4. When done, your PR should reference: Fixes #{claim.issue_number}
+=== CRITICAL INSTRUCTIONS ===
+1. DO NOT look at TODO.md or docs/TODO.md for task selection - your task is defined above
+2. DO NOT modify any TODO files - task tracking is via GitHub Issues
+3. Create branch: {claim.branch_name}
+4. Implement the task described above
+5. When done, your PR description MUST include: Fixes #{claim.issue_number}
+
+This task was claimed from the shared GitHub Issues task queue.
+Other agents may be working on other issues simultaneously.
+Focus only on implementing the task described above.
 """
 
             result = self.orchestra.run_implementer(task_description=task_prompt)
