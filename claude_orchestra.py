@@ -247,6 +247,12 @@ class ClaudeOrchestra:
                 event = json.loads(line)
                 event_type = event.get("type", "")
 
+                # For dashboard activity tracking: emit raw JSON for key events
+                # The dashboard parses these to track tools, files, subagents, etc.
+                if event_type in ("tool_use", "content_block_start", "tool_result"):
+                    # Print raw JSON on its own line for dashboard parsing
+                    print(line, flush=True)
+
                 # Assistant text output
                 if event_type == "assistant":
                     msg = event.get("message", {})

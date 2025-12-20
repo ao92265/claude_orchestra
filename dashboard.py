@@ -2826,13 +2826,22 @@ HTML_TEMPLATE = """
         // Multi-User UI Functions
         function updateConfigUI() {
             const status = document.getElementById('multiuser-status');
+            const taskQueueSection = document.querySelector('.task-queue-section');
 
             if (multiuserConfig.configured) {
                 status.textContent = 'Enabled';
                 status.className = 'multiuser-status configured';
+                // Hide task queue in multi-user mode - tasks come from GitHub Issues
+                if (taskQueueSection) {
+                    taskQueueSection.style.display = 'none';
+                }
             } else {
                 status.textContent = 'Not Configured';
                 status.className = 'multiuser-status not-configured';
+                // Show task queue in single-user mode
+                if (taskQueueSection) {
+                    taskQueueSection.style.display = 'block';
+                }
             }
 
             // Pre-fill form if we have config

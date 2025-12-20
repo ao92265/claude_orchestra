@@ -567,13 +567,15 @@ async def main():
     if config.enabled:
         config.print_summary()
 
-    # Create orchestra
+    # Create orchestra with all parameters
     orchestra = MultiUserOrchestra(
         project_path=args.project,
         config=config,
         timeout=args.timeout,
         model=args.model,
-        task_mode=args.task_mode
+        task_mode=args.task_mode,
+        guidance=getattr(args, 'guidance', '') or '',
+        use_subagents=getattr(args, 'use_subagents', False)
     )
 
     # Setup signal handlers
