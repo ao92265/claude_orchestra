@@ -15,10 +15,22 @@ from pathlib import Path
 from flask import Flask, render_template_string, jsonify, request
 from flask_socketio import SocketIO, emit
 from process_manager import get_process_manager
+from queue_manager import get_queue
+
+# Multi-user mode support
+try:
+    from dashboard_claims import register_claims_handlers, get_multiuser_html_components, get_multiuser_config
+    MULTIUSER_AVAILABLE = True
+except ImportError:
+    MULTIUSER_AVAILABLE = False
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'claude-orchestra-secret'
 socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Register multi-user handlers if available
+if MULTIUSER_AVAILABLE:
+    register_claims_handlers(socketio, app)
 
 # Initialize process manager for cleanup
 process_manager = get_process_manager()
@@ -83,9 +95,11 @@ usage_stats = {
     "history": []  # [{timestamp, requests, tokens}, ...]
 }
 
-# Message queue for queued tasks
-message_queue = []  # [{id, message, project_id, status, created_at}, ...]
-queue_counter = 0
+# Message queue - now file-based for cross-process communication
+# The in-memory reference is kept for backwards compatibility but
+# get_queue() should be used for all operations
+message_queue = []  # Deprecated - use get_queue() instead
+queue_counter = 0   # Deprecated - queue_manager handles this
 
 # Summary data for time-based view
 summary_data = {
@@ -396,46 +410,42 @@ def get_summary_stats(time_range='today'):
         "time_range": time_range
     }
 
-def add_to_queue(message, project_id=None):
-    """Add a message to the queue."""
-    global message_queue, queue_counter
-    queue_counter += 1
-    item = {
-        "id": queue_counter,
-        "message": message,
-        "project_id": project_id,
-        "status": "pending",
-        "created_at": datetime.now().isoformat()
-    }
-    message_queue.append(item)
-    socketio.emit('queue_update', get_queue_status())
+def add_to_queue(message, project_id=None, priority="normal"):
+    """Add a message to the queue (file-based for cross-process access)."""
+    queue = get_queue()
+    item = queue.add_message(message, project_id, priority)
+    socketio.emit('queue_update', {'queue': get_queue_status()})
+    socketio.emit('log_line', {'line': f'[QUEUE] Added message: {message[:50]}...' if len(message) > 50 else f'[QUEUE] Added message: {message}'})
     return item
 
 def get_queue_status():
     """Get queue status for UI."""
+    queue = get_queue()
+    status = queue.get_status()
     return {
-        "items": message_queue,
-        "pending_count": len([m for m in message_queue if m["status"] == "pending"]),
-        "processing_count": len([m for m in message_queue if m["status"] == "processing"])
+        "items": status["messages"],
+        "pending_count": status["pending"],
+        "processing_count": status["processing"]
     }
 
 def process_next_queue_item(project_id):
     """Get next pending queue item for a project."""
-    for item in message_queue:
-        if item["status"] == "pending" and (item["project_id"] is None or item["project_id"] == project_id):
-            item["status"] = "processing"
-            socketio.emit('queue_update', get_queue_status())
+    queue = get_queue()
+    item = queue.get_next_pending(project_id)
+    if item:
+        if queue.claim_message(item["id"]):
+            socketio.emit('queue_update', {'queue': get_queue_status()})
+            socketio.emit('log_line', {'line': f'[QUEUE] Processing: {item["message"][:50]}...'})
             return item
     return None
 
-def complete_queue_item(item_id, success=True):
+def complete_queue_item(item_id, success=True, result=None):
     """Mark a queue item as complete."""
-    for item in message_queue:
-        if item["id"] == item_id:
-            item["status"] = "completed" if success else "failed"
-            item["completed_at"] = datetime.now().isoformat()
-            socketio.emit('queue_update', get_queue_status())
-            return
+    queue = get_queue()
+    if queue.complete_message(item_id, success, result):
+        socketio.emit('queue_update', {'queue': get_queue_status()})
+        status = "completed" if success else "failed"
+        socketio.emit('log_line', {'line': f'[QUEUE] Message {item_id} {status}'})
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -1197,6 +1207,73 @@ HTML_TEMPLATE = """
             color: #8b949e;
             text-transform: uppercase;
         }
+
+        /* Multi-User Panel - Injected from dashboard_claims.py */
+        .multiuser-panel { margin-top: 20px; }
+        .multiuser-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; cursor: pointer; }
+        .multiuser-header h3 { font-size: 14px; color: #8b949e; text-transform: uppercase; display: flex; align-items: center; gap: 8px; }
+        .multiuser-status { padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .multiuser-status.configured { background: #238636; color: white; }
+        .multiuser-status.not-configured { background: #6e7681; color: white; }
+        .multiuser-content { display: none; }
+        .multiuser-content.expanded { display: block; }
+        .setup-form { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
+        .setup-form h4 { font-size: 13px; color: #c9d1d9; margin-bottom: 12px; }
+        .form-group { margin-bottom: 12px; }
+        .form-group label { display: block; font-size: 11px; color: #8b949e; margin-bottom: 4px; text-transform: uppercase; }
+        .form-group input { width: 100%; padding: 8px 10px; background: #21262d; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; font-size: 13px; }
+        .form-group input:focus { outline: none; border-color: #58a6ff; }
+        .form-group input.success { border-color: #238636; }
+        .form-group input.error { border-color: #f85149; }
+        .form-group small { display: block; margin-top: 4px; font-size: 10px; color: #6e7681; }
+        .form-row { display: flex; gap: 10px; }
+        .form-row .form-group { flex: 1; }
+        .form-actions { display: flex; gap: 8px; margin-top: 15px; }
+        .form-actions button { flex: 1; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid #30363d; background: #21262d; color: #c9d1d9; }
+        .form-actions button:hover { background: #30363d; }
+        .form-actions button.primary { background: #238636; border-color: #238636; color: white; }
+        .form-actions button.primary:hover { background: #2ea043; }
+        .form-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .connection-status { padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; display: none; }
+        .connection-status.success { display: block; background: #23863620; border: 1px solid #238636; color: #238636; }
+        .connection-status.error { display: block; background: #f8514920; border: 1px solid #f85149; color: #f85149; }
+        .sync-results { padding: 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; margin-top: 10px; font-size: 12px; }
+        .sync-results .stat { display: flex; justify-content: space-between; padding: 4px 0; }
+        .sync-results .stat-value { font-weight: 600; color: #58a6ff; }
+        .claims-section { margin-top: 15px; }
+        .claims-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .claims-header h4 { font-size: 12px; color: #8b949e; }
+        .claims-badge { background: #238636; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .claims-list { list-style: none; max-height: 200px; overflow-y: auto; }
+        .claim-item { padding: 10px; background: #21262d; border-radius: 6px; margin-bottom: 8px; border-left: 3px solid #30363d; }
+        .claim-item.mine { border-left-color: #238636; }
+        .claim-item.stale { border-left-color: #d29922; opacity: 0.8; }
+        .claim-issue { font-weight: 600; color: #58a6ff; font-size: 13px; }
+        .claim-agent { font-size: 10px; color: #8b949e; font-family: monospace; margin-top: 4px; }
+        .claim-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+        .heartbeat-indicator { display: flex; align-items: center; gap: 5px; font-size: 10px; }
+        .heartbeat-dot { width: 6px; height: 6px; border-radius: 50%; }
+        .heartbeat-dot.fresh { background: #238636; }
+        .heartbeat-dot.warning { background: #d29922; }
+        .heartbeat-dot.stale { background: #f85149; }
+        .claim-release-btn { padding: 3px 6px; font-size: 9px; background: transparent; border: 1px solid #f85149; color: #f85149; border-radius: 4px; cursor: pointer; }
+        .claim-release-btn:hover { background: #f8514920; }
+        .available-section { margin-top: 15px; }
+        .available-section h4 { font-size: 12px; color: #8b949e; margin-bottom: 10px; }
+        .task-item { padding: 8px 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+        .task-number { background: #30363d; color: #8b949e; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
+        .task-title { flex: 1; font-size: 11px; color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .task-labels { display: flex; gap: 4px; }
+        .task-label { padding: 2px 5px; border-radius: 3px; font-size: 9px; font-weight: 500; }
+        .task-label.high { background: #b6020530; color: #f85149; }
+        .task-label.medium { background: #d2992230; color: #d29922; }
+        .task-label.low { background: #23863630; color: #238636; }
+        .refresh-actions { display: flex; gap: 8px; margin-top: 10px; }
+        .refresh-actions button { flex: 1; padding: 6px 10px; font-size: 11px; background: #21262d; border: 1px solid #30363d; color: #8b949e; border-radius: 4px; cursor: pointer; }
+        .refresh-actions button:hover { background: #30363d; color: #c9d1d9; }
+        .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .hidden { display: none !important; }
     </style>
 </head>
 <body>
@@ -1434,6 +1511,98 @@ HTML_TEMPLATE = """
                     <ul class="pr-list" id="subagentsList">
                         <li class="pr-item" style="color: #8b949e;">None yet</li>
                     </ul>
+                </div>
+
+                <!-- Multi-User Mode Panel -->
+                <div class="card multiuser-panel">
+                    <div class="multiuser-header" onclick="toggleMultiUserPanel()">
+                        <h3>
+                            👥 Multi-User Mode
+                            <span class="multiuser-status not-configured" id="multiuser-status">Not Configured</span>
+                        </h3>
+                        <span id="multiuser-toggle">▼</span>
+                    </div>
+
+                    <div class="multiuser-content" id="multiuser-content">
+                        <!-- Setup Form -->
+                        <div class="setup-form" id="setup-form">
+                            <h4>⚙️ Configuration</h4>
+
+                            <div class="form-group">
+                                <label>GitHub Token</label>
+                                <input type="password" id="github-token" placeholder="ghp_xxxxxxxxxxxx">
+                                <small>Get from: github.com/settings/tokens (needs 'repo' scope)</small>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Repository</label>
+                                <input type="text" id="github-repo" placeholder="owner/repo">
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Claim Timeout (sec)</label>
+                                    <input type="number" id="claim-timeout" value="1800">
+                                </div>
+                                <div class="form-group">
+                                    <label>Heartbeat (sec)</label>
+                                    <input type="number" id="heartbeat-interval" value="300">
+                                </div>
+                            </div>
+
+                            <div class="form-actions">
+                                <button onclick="testConnection()" id="test-btn">
+                                    🔌 Test Connection
+                                </button>
+                                <button onclick="saveConfig()" class="primary" id="save-btn">
+                                    💾 Save & Enable
+                                </button>
+                            </div>
+
+                            <div class="connection-status" id="connection-status"></div>
+                        </div>
+
+                        <!-- Sync Section -->
+                        <div class="setup-form" id="sync-section">
+                            <h4>📋 Sync TODO.md → GitHub Issues</h4>
+                            <p style="font-size: 11px; color: #8b949e; margin-bottom: 10px;">
+                                Creates GitHub Issues from your TODO.md file for task coordination.
+                            </p>
+                            <button onclick="syncTodos()" id="sync-btn" style="width: 100%;">
+                                🔄 Sync Now
+                            </button>
+                            <div class="sync-results hidden" id="sync-results">
+                                <div class="stat"><span>Created:</span><span class="stat-value" id="sync-created">0</span></div>
+                                <div class="stat"><span>Updated:</span><span class="stat-value" id="sync-updated">0</span></div>
+                                <div class="stat"><span>Unchanged:</span><span class="stat-value" id="sync-unchanged">0</span></div>
+                            </div>
+                        </div>
+
+                        <!-- Active Claims -->
+                        <div class="claims-section">
+                            <div class="claims-header">
+                                <h4>🔒 Active Claims</h4>
+                                <span class="claims-badge" id="claims-count">0</span>
+                            </div>
+                            <ul class="claims-list" id="claims-list">
+                                <li style="color: #6e7681; font-size: 11px;">No active claims</li>
+                            </ul>
+                        </div>
+
+                        <!-- Available Tasks -->
+                        <div class="available-section">
+                            <h4>📝 Available Tasks (<span id="available-count">0</span>)</h4>
+                            <div id="available-tasks-list">
+                                <div style="color: #6e7681; font-size: 11px;">Configure multi-user mode to see tasks</div>
+                            </div>
+                        </div>
+
+                        <!-- Refresh Actions -->
+                        <div class="refresh-actions">
+                            <button onclick="refreshClaims()">↻ Refresh</button>
+                            <button onclick="reclaimStale()">🧹 Release Stale</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2534,6 +2703,285 @@ HTML_TEMPLATE = """
             socket.emit('get_usage');
             socket.emit('get_summary');
         }, 30000);
+
+        // ========================================
+        // Multi-User Mode Functions
+        // ========================================
+
+        // Multi-User Mode State
+        let multiuserConfig = { configured: false };
+        let claimsData = { claims: [] };
+        let availableTasksData = { tasks: [] };
+
+        // Toggle panel
+        function toggleMultiUserPanel() {
+            const content = document.getElementById('multiuser-content');
+            const toggle = document.getElementById('multiuser-toggle');
+            content.classList.toggle('expanded');
+            toggle.textContent = content.classList.contains('expanded') ? '▲' : '▼';
+
+            if (content.classList.contains('expanded')) {
+                socket.emit('get_multiuser_config');
+                refreshClaims();
+
+                // Auto-detect repo from current project
+                const projectPath = getCurrentProjectPath();
+                if (projectPath) {
+                    socket.emit('get_repo_from_project', { project_path: projectPath });
+                }
+            }
+        }
+
+        // Get current project path from either running or pending projects
+        function getCurrentProjectPath() {
+            // Check running projects first
+            if (projectsData[currentProjectId]) {
+                return projectsData[currentProjectId].project_path;
+            }
+            // Check pending projects
+            if (pendingProjects[currentProjectId]) {
+                return pendingProjects[currentProjectId].path;
+            }
+            return null;
+        }
+
+        // Socket handlers for multi-user mode
+        socket.on('multiuser_config', function(data) {
+            multiuserConfig = data;
+            updateConfigUI();
+        });
+
+        // Handle auto-detected repo from project
+        socket.on('project_repo', function(data) {
+            if (data.success && data.repo) {
+                const repoInput = document.getElementById('github-repo');
+                // Only auto-fill if empty or same as before
+                if (!repoInput.value || repoInput.value === multiuserConfig.repo) {
+                    repoInput.value = data.repo;
+                }
+            }
+        });
+
+        socket.on('connection_result', function(data) {
+            const status = document.getElementById('connection-status');
+            const tokenInput = document.getElementById('github-token');
+
+            if (data.success) {
+                status.className = 'connection-status success';
+                status.textContent = '✓ Connected as @' + data.username;
+                tokenInput.classList.add('success');
+                tokenInput.classList.remove('error');
+            } else {
+                status.className = 'connection-status error';
+                status.textContent = '✗ ' + data.error;
+                tokenInput.classList.add('error');
+                tokenInput.classList.remove('success');
+            }
+
+            document.getElementById('test-btn').disabled = false;
+            document.getElementById('test-btn').textContent = '🔌 Test Connection';
+        });
+
+        socket.on('config_saved', function(data) {
+            document.getElementById('save-btn').disabled = false;
+            document.getElementById('save-btn').textContent = '💾 Save & Enable';
+            if (data.success) {
+                refreshClaims();
+            }
+        });
+
+        socket.on('sync_result', function(data) {
+            const btn = document.getElementById('sync-btn');
+            const results = document.getElementById('sync-results');
+
+            btn.disabled = false;
+            btn.textContent = '🔄 Sync Now';
+
+            if (data.success) {
+                results.classList.remove('hidden');
+                document.getElementById('sync-created').textContent = data.created;
+                document.getElementById('sync-updated').textContent = data.updated;
+                document.getElementById('sync-unchanged').textContent = data.unchanged;
+            } else {
+                alert('Sync failed: ' + data.error);
+            }
+        });
+
+        socket.on('claims_update', function(data) {
+            claimsData = data;
+            renderClaims();
+        });
+
+        socket.on('available_tasks_update', function(data) {
+            availableTasksData = data;
+            renderAvailableTasks();
+        });
+
+        socket.on('stale_reclaimed', function(data) {
+            if (data.success) {
+                alert('Released ' + data.released_count + ' stale claim(s)');
+            }
+        });
+
+        // Multi-User UI Functions
+        function updateConfigUI() {
+            const status = document.getElementById('multiuser-status');
+
+            if (multiuserConfig.configured) {
+                status.textContent = 'Enabled';
+                status.className = 'multiuser-status configured';
+            } else {
+                status.textContent = 'Not Configured';
+                status.className = 'multiuser-status not-configured';
+            }
+
+            // Pre-fill form if we have config
+            if (multiuserConfig.repo) {
+                document.getElementById('github-repo').value = multiuserConfig.repo;
+            }
+            if (multiuserConfig.claim_timeout) {
+                document.getElementById('claim-timeout').value = multiuserConfig.claim_timeout;
+            }
+            if (multiuserConfig.heartbeat_interval) {
+                document.getElementById('heartbeat-interval').value = multiuserConfig.heartbeat_interval;
+            }
+            if (multiuserConfig.has_token) {
+                document.getElementById('github-token').placeholder = multiuserConfig.masked_token || 'Token saved';
+            }
+        }
+
+        function testConnection() {
+            const btn = document.getElementById('test-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Testing...';
+
+            const token = document.getElementById('github-token').value;
+            if (token) {
+                socket.emit('save_multiuser_config', {
+                    github_token: token,
+                    repo: document.getElementById('github-repo').value,
+                    claim_timeout: document.getElementById('claim-timeout').value,
+                    heartbeat_interval: document.getElementById('heartbeat-interval').value
+                });
+            }
+
+            socket.emit('test_github_connection');
+        }
+
+        function saveConfig() {
+            const btn = document.getElementById('save-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Saving...';
+
+            socket.emit('save_multiuser_config', {
+                github_token: document.getElementById('github-token').value,
+                repo: document.getElementById('github-repo').value,
+                claim_timeout: document.getElementById('claim-timeout').value,
+                heartbeat_interval: document.getElementById('heartbeat-interval').value
+            });
+        }
+
+        function syncTodos() {
+            const btn = document.getElementById('sync-btn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Syncing...';
+
+            // Include project path so sync knows where TODO.md is
+            const projectPath = getCurrentProjectPath();
+            socket.emit('sync_todos', { project_path: projectPath });
+        }
+
+        function refreshClaims() {
+            socket.emit('get_claims');
+            socket.emit('get_available_tasks');
+        }
+
+        function reclaimStale() {
+            if (confirm('Release all stale claims (no heartbeat for 30+ min)?')) {
+                socket.emit('reclaim_stale');
+            }
+        }
+
+        function releaseClaim(issueNumber) {
+            if (confirm('Release your claim on issue #' + issueNumber + '?')) {
+                socket.emit('release_claim', { issue_number: issueNumber });
+            }
+        }
+
+        function renderClaims() {
+            const list = document.getElementById('claims-list');
+            const count = document.getElementById('claims-count');
+
+            count.textContent = claimsData.claims ? claimsData.claims.length : 0;
+
+            if (!claimsData.claims || claimsData.claims.length === 0) {
+                list.innerHTML = '<li style="color: #6e7681; font-size: 11px;">No active claims</li>';
+                return;
+            }
+
+            list.innerHTML = claimsData.claims.map(claim => {
+                const isMine = claim.is_mine;
+                const age = claim.age_minutes || 0;
+                const isStale = age > 30;
+                const isWarning = age > 15;
+                const heartbeatClass = isStale ? 'stale' : (isWarning ? 'warning' : 'fresh');
+                const ageText = age < 1 ? 'just now' : age + 'm ago';
+                const title = claim.title ? (claim.title.length > 40 ? claim.title.substring(0, 40) + '...' : claim.title) : '';
+                const username = claim.github_username || 'unknown';
+
+                return '<li class="claim-item ' + (isMine ? 'mine' : '') + ' ' + (isStale ? 'stale' : '') + '">' +
+                    '<div class="claim-issue">' +
+                        '<strong>#' + claim.issue_number + '</strong> ' +
+                        '<span style="color: #58a6ff;">@' + username + '</span>' +
+                        (isMine ? ' <span style="color: #3fb950;">(you)</span>' : '') +
+                    '</div>' +
+                    '<div class="claim-title" style="font-size: 11px; color: #c9d1d9; margin: 2px 0;">' + escapeHtml(title) + '</div>' +
+                    '<div class="claim-meta">' +
+                        '<span class="heartbeat-indicator"><span class="heartbeat-dot ' + heartbeatClass + '"></span>' + ageText + '</span>' +
+                        (isMine ? '<button class="claim-release-btn" onclick="releaseClaim(' + claim.issue_number + ')">Release</button>' : '') +
+                    '</div>' +
+                '</li>';
+            }).join('');
+        }
+
+        function renderAvailableTasks() {
+            const list = document.getElementById('available-tasks-list');
+            const count = document.getElementById('available-count');
+
+            if (!availableTasksData.tasks || availableTasksData.tasks.length === 0) {
+                count.textContent = '0';
+                list.innerHTML = '<div style="color: #6e7681; font-size: 11px;">No available tasks</div>';
+                return;
+            }
+
+            count.textContent = availableTasksData.tasks.length;
+
+            list.innerHTML = availableTasksData.tasks.slice(0, 5).map(task => {
+                const priority = task.priority ? '<span class="task-label ' + task.priority + '">' + task.priority + '</span>' : '';
+                const size = task.size ? '<span class="task-label ' + task.size + '">' + task.size + '</span>' : '';
+                const title = task.title.length > 35 ? task.title.substring(0, 35) + '...' : task.title;
+
+                return '<div class="task-item">' +
+                    '<span class="task-number">#' + task.issue_number + '</span>' +
+                    '<span class="task-title">' + escapeHtml(title) + '</span>' +
+                    '<div class="task-labels">' + priority + size + '</div>' +
+                '</div>';
+            }).join('');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Auto-refresh claims every 30s when panel is open
+        setInterval(function() {
+            if (document.getElementById('multiuser-content') &&
+                document.getElementById('multiuser-content').classList.contains('expanded')) {
+                refreshClaims();
+            }
+        }, 30000);
     </script>
 
     <!-- Directory Browser Modal -->
@@ -2914,9 +3362,24 @@ def handle_start(data):
 
         open(log_file, 'w').close()
 
+        # Check if multi-user mode is enabled
+        multiuser_config = None
+        if MULTIUSER_AVAILABLE:
+            multiuser_config = get_multiuser_config()
+
+        # Choose the right orchestra script based on multi-user mode
+        if multiuser_config and multiuser_config.get('enabled'):
+            # Use multi-user orchestra - claims tasks from GitHub Issues
+            orchestra_script = os.path.join(script_dir, 'orchestra_multi_user.py')
+            print(f"[Multi-User] Using multi-user orchestra with repo: {multiuser_config['repo']}")
+        else:
+            # Use standard orchestra - reads from TODO.md
+            orchestra_script = os.path.join(script_dir, 'claude_orchestra.py')
+            print("[Orchestra] Using standard orchestra (no multi-user)")
+
         cmd = [
             'python3', '-u',  # Unbuffered output for real-time streaming
-            os.path.join(script_dir, 'claude_orchestra.py'),
+            orchestra_script,
             '--project', project_path,
             '--continuous',
             '--timeout', '1800',  # 30 minutes per agent
@@ -2943,13 +3406,23 @@ def handle_start(data):
         if state.get("use_subagents", True):
             cmd.append('--use-subagents')
 
+        # Set up environment with multi-user config
+        env = os.environ.copy()
+        if multiuser_config and multiuser_config.get('enabled'):
+            env['ORCHESTRA_MULTI_USER'] = 'true'
+            env['GITHUB_TOKEN'] = multiuser_config['github_token']
+            env['GITHUB_REPO'] = multiuser_config['repo']
+            env['ORCHESTRA_CLAIM_TIMEOUT'] = str(multiuser_config['claim_timeout'])
+            env['ORCHESTRA_HEARTBEAT_INTERVAL'] = str(multiuser_config['heartbeat_interval'])
+
         state["process"] = subprocess.Popen(
             cmd,
             cwd=script_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1  # Line buffered for real-time output
+            bufsize=1,  # Line buffered for real-time output
+            env=env
         )
 
         # Track the process for automatic cleanup
