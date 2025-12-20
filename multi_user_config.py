@@ -34,9 +34,9 @@ class MultiUserConfig:
         "docs/TASKS.md"
     ])
 
-    # Task selection
-    prefer_priority: Optional[str] = None  # "high", "medium", "low"
-    prefer_size: Optional[str] = None      # "small", "medium", "large"
+    # Task selection - default to high priority to ensure important tasks are picked first
+    prefer_priority: Optional[str] = "high"  # "highest", "high", "medium", "low"
+    prefer_size: Optional[str] = None        # "small", "medium", "large"
 
     @classmethod
     def from_env(cls) -> 'MultiUserConfig':
@@ -66,6 +66,8 @@ class MultiUserConfig:
             heartbeat_interval=int(os.getenv("ORCHESTRA_HEARTBEAT_INTERVAL", "300")),
             claim_timeout=int(os.getenv("ORCHESTRA_CLAIM_TIMEOUT", "1800")),
             auto_sync_todos=os.getenv("ORCHESTRA_AUTO_SYNC", "true").lower() == "true",
+            prefer_priority=os.getenv("ORCHESTRA_PREFER_PRIORITY", "high"),
+            prefer_size=os.getenv("ORCHESTRA_PREFER_SIZE"),
         )
 
     @classmethod

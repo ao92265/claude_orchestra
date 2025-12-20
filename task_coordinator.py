@@ -10,6 +10,7 @@ on the same repository without conflicts.
 import os
 import re
 import ssl
+import time
 import asyncio
 import hashlib
 import logging
@@ -47,6 +48,7 @@ class TaskStatus(Enum):
 
 class TaskPriority(Enum):
     """Priority level for tasks."""
+    HIGHEST = "highest"
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
@@ -177,6 +179,10 @@ ORCHESTRA_LABELS = {
         "description": "PR created, awaiting review"
     },
     # Priority labels
+    "priority:highest": {
+        "color": "ff0000",
+        "description": "Highest priority - critical/blocking task"
+    },
     "priority:high": {
         "color": "b60205",
         "description": "High priority task"
@@ -218,7 +224,12 @@ class GitHubAPIError(Exception):
 
 
 class GitHubClient:
-    """Async GitHub API client for issue management."""
+    """Async GitHub API client for issue management with rate limit handling."""
+
+    # Rate limit configuration
+    MAX_RETRIES = 5
+    BASE_BACKOFF_SECONDS = 2
+    MIN_REMAINING_BEFORE_PAUSE = 10  # Pause when fewer than this many requests remain
 
     def __init__(self, owner: str, repo: str, token: str):
         self.owner = owner
@@ -227,6 +238,9 @@ class GitHubClient:
         self.base_url = "https://api.github.com"
         self._session: Optional[aiohttp.ClientSession] = None
         self._username: Optional[str] = None
+        # Rate limit tracking
+        self._rate_limit_remaining: int = 5000
+        self._rate_limit_reset: int = 0
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -248,6 +262,16 @@ class GitHubClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    def get_rate_limit_status(self) -> Dict[str, Any]:
+        """Get current rate limit status."""
+        reset_in = max(0, self._rate_limit_reset - int(time.time()))
+        return {
+            "remaining": self._rate_limit_remaining,
+            "reset_in_seconds": reset_in,
+            "reset_at": datetime.fromtimestamp(self._rate_limit_reset).isoformat() if self._rate_limit_reset else None,
+            "is_low": self._rate_limit_remaining < self.MIN_REMAINING_BEFORE_PAUSE
+        }
+
     async def get_authenticated_user(self) -> str:
         """Get the username of the authenticated user."""
         if self._username:
@@ -268,17 +292,59 @@ class GitHubClient:
         data: Optional[Dict] = None,
         params: Optional[Dict] = None
     ) -> Tuple[int, Any]:
-        """Make an API request."""
+        """Make an API request with rate limit handling and exponential backoff."""
         session = await self._get_session()
         url = f"{self.base_url}{endpoint}"
 
-        async with session.request(method, url, json=data, params=params) as resp:
-            try:
-                response_data = await resp.json()
-            except:
-                response_data = await resp.text()
+        for attempt in range(self.MAX_RETRIES):
+            # Check if we're low on rate limit and should proactively wait
+            if self._rate_limit_remaining < self.MIN_REMAINING_BEFORE_PAUSE:
+                wait_time = max(0, self._rate_limit_reset - int(time.time()))
+                if wait_time > 0:
+                    logger.warning(
+                        f"Rate limit low ({self._rate_limit_remaining} remaining). "
+                        f"Waiting {wait_time}s until reset..."
+                    )
+                    await asyncio.sleep(min(wait_time + 1, 60))  # Cap at 60s
 
-            return resp.status, response_data
+            async with session.request(method, url, json=data, params=params) as resp:
+                # Update rate limit tracking from headers
+                self._rate_limit_remaining = int(resp.headers.get('X-RateLimit-Remaining', 5000))
+                self._rate_limit_reset = int(resp.headers.get('X-RateLimit-Reset', 0))
+
+                try:
+                    response_data = await resp.json()
+                except:
+                    response_data = await resp.text()
+
+                # Handle rate limiting (403 with rate limit message or 429)
+                if resp.status in (403, 429):
+                    if 'rate limit' in str(response_data).lower():
+                        # Calculate wait time from reset header or use exponential backoff
+                        reset_time = int(resp.headers.get('X-RateLimit-Reset', 0))
+                        if reset_time > 0:
+                            wait_time = max(0, reset_time - int(time.time())) + 1
+                        else:
+                            wait_time = self.BASE_BACKOFF_SECONDS * (2 ** attempt)
+
+                        # Cap wait time at 5 minutes
+                        wait_time = min(wait_time, 300)
+
+                        logger.warning(
+                            f"Rate limited on {method} {endpoint}. "
+                            f"Attempt {attempt + 1}/{self.MAX_RETRIES}. "
+                            f"Waiting {wait_time}s before retry..."
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+
+                return resp.status, response_data
+
+        # If we exhausted retries, raise an error
+        raise GitHubAPIError(
+            f"Rate limit exceeded after {self.MAX_RETRIES} retries on {method} {endpoint}",
+            status_code=429
+        )
 
     # -------------------------------------------------------------------------
     # Repository
@@ -795,9 +861,9 @@ class TaskCoordinator:
 
         tasks = [self._issue_to_task(issue) for issue in issues]
 
-        # Sort by priority
-        priority_order = {"high": 0, "medium": 1, "low": 2, None: 3}
-        tasks.sort(key=lambda t: priority_order.get(t.priority.value if t.priority else None, 3))
+        # Sort by priority (highest first)
+        priority_order = {"highest": 0, "high": 1, "medium": 2, "low": 3, None: 4}
+        tasks.sort(key=lambda t: priority_order.get(t.priority.value if t.priority else None, 4))
 
         return tasks
 

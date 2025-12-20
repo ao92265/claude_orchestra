@@ -29,6 +29,7 @@ from claude_orchestra import ClaudeOrchestra, AgentResult, AgentRole
 from task_coordinator import TaskCoordinator, ClaimResult, TaskStatus
 from multi_user_config import MultiUserConfig, add_multi_user_args, config_from_args
 from instance_manager import InstanceManager
+from queue_manager import get_queue
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +219,11 @@ Description:
 2. DO NOT modify any TODO files - task tracking is via GitHub Issues
 3. Create branch: {claim.branch_name}
 4. Implement the task described above
-5. When done, your PR description MUST include: Fixes #{claim.issue_number}
+
+=== GITHUB ISSUE LINKING (MANDATORY) ===
+This task is linked to GitHub Issue #{claim.issue_number}.
+When the TESTER agent creates a PR, it MUST include "Fixes #{claim.issue_number}" in the PR body.
+This will automatically close the issue when the PR is merged.
 
 This task was claimed from the shared GitHub Issues task queue.
 Other agents may be working on other issues simultaneously.
@@ -268,7 +273,9 @@ Focus only on implementing the task described above.
         if not branch_name and self._current_claim:
             branch_name = self._current_claim.branch_name
 
-        result = self.orchestra.run_tester(branch_name)
+        # Pass issue number so PR description includes "Fixes #<issue>"
+        issue_number = self._current_claim.issue_number if self._current_claim else None
+        result = self.orchestra.run_tester(branch_name, issue_number=issue_number)
 
         # Update issue with PR if created
         if result.pr_number and self._current_claim and self.coordinator:
@@ -308,9 +315,12 @@ Focus only on implementing the task described above.
             issue_number=self._current_claim.issue_number if self._current_claim else None
         )
 
-    async def run_cycle(self) -> dict:
+    async def run_cycle(self, task_override: Optional[str] = None) -> dict:
         """
         Run a complete development cycle with multi-user coordination.
+
+        Args:
+            task_override: Optional task description from queue that takes priority
 
         Returns a dict with results from each agent stage.
         """
@@ -325,7 +335,7 @@ Focus only on implementing the task described above.
         logger.info("STAGE 1: IMPLEMENTER")
         logger.info("=" * 60)
 
-        impl_result = await self.run_implementer()
+        impl_result = await self.run_implementer(task_description=task_override)
         results['implementer'] = impl_result
 
         if not impl_result.success:
@@ -390,6 +400,9 @@ Focus only on implementing the task described above.
 
         await self.setup()
 
+        # Initialize queue manager for checking dashboard messages
+        queue = get_queue()
+
         for cycle_num in range(1, max_cycles + 1):
             # Check time limit
             if max_hours:
@@ -402,13 +415,32 @@ Focus only on implementing the task described above.
             logger.info(f"CYCLE {cycle_num}/{max_cycles}")
             logger.info("=" * 60)
 
+            # Check for queued messages from dashboard
+            queued_message = queue.get_next_pending()
+            if queued_message:
+                logger.info(f"[QUEUE] Found queued message: {queued_message['message'][:60]}...")
+                queue.claim_message(queued_message["id"])
+                # Use queued message as the task description
+                task_override = queued_message["message"]
+            else:
+                task_override = None
+
             try:
-                cycle_result = await self.run_cycle()
+                cycle_result = await self.run_cycle(task_override=task_override)
                 all_results.append({
                     'cycle': cycle_num,
                     'results': cycle_result,
                     'success': all(r.success for r in cycle_result.values() if r)
                 })
+
+                # Mark queued message as completed
+                if queued_message:
+                    success = cycle_result.get('implementer') and cycle_result['implementer'].success
+                    queue.complete_message(
+                        queued_message["id"],
+                        success=success,
+                        result=f"Cycle {cycle_num}: {'completed' if success else 'failed'}"
+                    )
 
                 # If no task was claimed, we're done
                 if not cycle_result.get('implementer') or not cycle_result['implementer'].success:
@@ -423,6 +455,9 @@ Focus only on implementing the task described above.
                     'error': str(e),
                     'success': False
                 })
+                # Mark queued message as failed if there was one
+                if queued_message:
+                    queue.complete_message(queued_message["id"], success=False, result=str(e))
 
         await self.cleanup()
         return all_results

@@ -15,6 +15,7 @@ from pathlib import Path
 from flask import Flask, render_template_string, jsonify, request
 from flask_socketio import SocketIO, emit
 from process_manager import get_process_manager
+from queue_manager import get_queue
 
 # Multi-user mode support
 try:
@@ -94,9 +95,11 @@ usage_stats = {
     "history": []  # [{timestamp, requests, tokens}, ...]
 }
 
-# Message queue for queued tasks
-message_queue = []  # [{id, message, project_id, status, created_at}, ...]
-queue_counter = 0
+# Message queue - now file-based for cross-process communication
+# The in-memory reference is kept for backwards compatibility but
+# get_queue() should be used for all operations
+message_queue = []  # Deprecated - use get_queue() instead
+queue_counter = 0   # Deprecated - queue_manager handles this
 
 # Summary data for time-based view
 summary_data = {
@@ -407,46 +410,42 @@ def get_summary_stats(time_range='today'):
         "time_range": time_range
     }
 
-def add_to_queue(message, project_id=None):
-    """Add a message to the queue."""
-    global message_queue, queue_counter
-    queue_counter += 1
-    item = {
-        "id": queue_counter,
-        "message": message,
-        "project_id": project_id,
-        "status": "pending",
-        "created_at": datetime.now().isoformat()
-    }
-    message_queue.append(item)
-    socketio.emit('queue_update', get_queue_status())
+def add_to_queue(message, project_id=None, priority="normal"):
+    """Add a message to the queue (file-based for cross-process access)."""
+    queue = get_queue()
+    item = queue.add_message(message, project_id, priority)
+    socketio.emit('queue_update', {'queue': get_queue_status()})
+    socketio.emit('log_line', {'line': f'[QUEUE] Added message: {message[:50]}...' if len(message) > 50 else f'[QUEUE] Added message: {message}'})
     return item
 
 def get_queue_status():
     """Get queue status for UI."""
+    queue = get_queue()
+    status = queue.get_status()
     return {
-        "items": message_queue,
-        "pending_count": len([m for m in message_queue if m["status"] == "pending"]),
-        "processing_count": len([m for m in message_queue if m["status"] == "processing"])
+        "items": status["messages"],
+        "pending_count": status["pending"],
+        "processing_count": status["processing"]
     }
 
 def process_next_queue_item(project_id):
     """Get next pending queue item for a project."""
-    for item in message_queue:
-        if item["status"] == "pending" and (item["project_id"] is None or item["project_id"] == project_id):
-            item["status"] = "processing"
-            socketio.emit('queue_update', get_queue_status())
+    queue = get_queue()
+    item = queue.get_next_pending(project_id)
+    if item:
+        if queue.claim_message(item["id"]):
+            socketio.emit('queue_update', {'queue': get_queue_status()})
+            socketio.emit('log_line', {'line': f'[QUEUE] Processing: {item["message"][:50]}...'})
             return item
     return None
 
-def complete_queue_item(item_id, success=True):
+def complete_queue_item(item_id, success=True, result=None):
     """Mark a queue item as complete."""
-    for item in message_queue:
-        if item["id"] == item_id:
-            item["status"] = "completed" if success else "failed"
-            item["completed_at"] = datetime.now().isoformat()
-            socketio.emit('queue_update', get_queue_status())
-            return
+    queue = get_queue()
+    if queue.complete_message(item_id, success, result):
+        socketio.emit('queue_update', {'queue': get_queue_status()})
+        status = "completed" if success else "failed"
+        socketio.emit('log_line', {'line': f'[QUEUE] Message {item_id} {status}'})
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>

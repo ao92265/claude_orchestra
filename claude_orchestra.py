@@ -599,20 +599,35 @@ Work autonomously until the implementation is complete. Be thorough but pragmati
 
         return result
 
-    def run_tester(self, branch_name: Optional[str] = None) -> AgentResult:
+    def run_tester(self, branch_name: Optional[str] = None, issue_number: Optional[int] = None) -> AgentResult:
         """
         Run the Tester agent to test changes and create a PR if tests pass.
 
         This agent runs tests, fixes any issues, and creates a pull request
         when everything is working.
+
+        Args:
+            branch_name: Optional branch name to test
+            issue_number: Optional GitHub issue number to close when PR is merged
         """
         branch_context = f"on branch '{branch_name}'" if branch_name else "on the current feature branch"
         subagent_instructions = self._get_subagent_instructions("tester")
 
+        # Add issue closing instruction if issue_number provided
+        if issue_number:
+            issue_instruction = f"""
+IMPORTANT - GITHUB ISSUE LINKING:
+This task is tracked by GitHub Issue #{issue_number}.
+Your PR description MUST include "Fixes #{issue_number}" or "Closes #{issue_number}"
+to automatically close the issue when the PR is merged.
+"""
+        else:
+            issue_instruction = ""
+
         prompt = f"""You are the TESTER agent in an autonomous development pipeline.
 
 Your task: Thoroughly test the recent changes {branch_context} and create a PR if tests pass.
-{subagent_instructions}
+{subagent_instructions}{issue_instruction}
 Instructions:
 1. Identify the current feature branch (or checkout {branch_name} if specified)
 2. Run the project's test suite (look for pytest, npm test, etc.)
@@ -624,7 +639,8 @@ Instructions:
 5. If everything passes, create a Pull Request:
    - Use `gh pr create` or similar
    - Write a comprehensive PR description
-   - Include test results summary
+   - Include test results summary{f'''
+   - MUST include "Fixes #{issue_number}" in the PR body''' if issue_number else ''}
 6. Output a summary including:
    - PR_NUMBER: <the PR number created>
    - TEST_RESULTS: <summary of test results>
